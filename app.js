@@ -26,8 +26,14 @@ document.addEventListener('DOMContentLoaded', () => {
         connectionStatus.textContent = 'Connected';
         connectionStatus.classList.add('online');
         
+        // Request current live users from all peers when connection is established
+        room.send({
+            type: "requestLiveStatus",
+            clientId: room.party.client.id
+        });
+        
         // Refresh live users when connection is established
-        refreshLiveUsers();
+        setTimeout(refreshLiveUsers, 500);
     };
 
     room.onclose = () => {
@@ -76,6 +82,16 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'disconnected':
                 // Refresh our live users list when someone connects or disconnects
                 setTimeout(refreshLiveUsers, 1000);
+                break;
+            case 'requestLiveStatus':
+                // If we are live, respond to the request with our status
+                if (isLive) {
+                    room.send({
+                        type: "goLive",
+                        clientId: room.party.client.id,
+                        username: room.party.client.username
+                    });
+                }
                 break;
         }
     };
@@ -731,14 +747,11 @@ function addChatMessage(username, message, isSelf = false) {
     const messageElement = document.createElement('div');
     messageElement.className = `chat-message ${isSelf ? 'self' : 'other'}`;
     
-    if (!isSelf) {
-        messageElement.innerHTML = `
-            <div class="username">${username}</div>
-            ${message}
-        `;
-    } else {
-        messageElement.textContent = message;
-    }
+    // Always show username, even for self messages
+    messageElement.innerHTML = `
+        <div class="username">${username}</div>
+        ${message}
+    `;
     
     chatMessages.appendChild(messageElement);
     chatMessages.scrollTop = chatMessages.scrollHeight;
