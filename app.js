@@ -210,6 +210,15 @@ function toggleLive() {
                 clearInterval(screen.frameInterval);
                 screen.frameInterval = null;
             }
+            
+            // Notify others that we've stopped sharing this screen
+            if (screen.recording) {
+                room.send({
+                    type: "stopScreenShare",
+                    screenId: screen.id,
+                    clientId: room.party.client.id
+                });
+            }
         });
         
         // Clear remote screens
@@ -305,7 +314,12 @@ function updateRemoteScreens(data) {
         s => s.clientId === data.clientId && s.screenId === data.screenId
     );
     
-    if (existingScreen) return; // Already have this screen
+    if (existingScreen) {
+        // If the screen exists but might need to be updated
+        existingScreen.element.querySelector('.screen-title').textContent = 
+            data.title || `Screen from ${data.username}`;
+        return;
+    }
     
     // Create a new container for the remote screen
     const screensContainer = document.getElementById('screens-container');
