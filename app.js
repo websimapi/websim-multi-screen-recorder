@@ -3,6 +3,7 @@ let room;
 let isLive = false;
 let screens = [];
 let nextScreenId = 1;
+let remoteScreens = []; // Track screens from other users
 
 document.addEventListener('DOMContentLoaded', () => {
     const addScreenBtn = document.getElementById('addScreenBtn');
@@ -32,6 +33,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.type === 'screenShare') {
             // Handle incoming screen share data
             updateRemoteScreens(data);
+        } else if (data.type === 'screenFrame') {
+            // Handle incoming screen frame data
+            updateRemoteScreenFrame(data);
+        } else if (data.type === 'stopScreenShare') {
+            // Handle when a remote user stops sharing
+            removeRemoteScreen(data);
         }
     };
 
@@ -73,7 +80,8 @@ function addNewScreen() {
         element: screenWrapper,
         video: screenWrapper.querySelector(`#video-${screenId}`),
         stream: null,
-        recording: false
+        recording: false,
+        frameInterval: null
     });
     
     // Setup event listeners for this screen
@@ -120,9 +128,10 @@ async function startCapture(screenId) {
             stopCapture(screenId);
         });
         
-        // If we're live, broadcast the stream
+        // Setup frame capture interval if we're live
         if (isLive) {
             sendScreenData(screenId);
+            setupFrameCapture(screenId);
         }
         
     } catch (error) {
@@ -134,6 +143,21 @@ function stopCapture(screenId) {
     const screen = screens.find(s => s.id === screenId);
     
     if (screen && screen.stream) {
+        // Stop frame capture interval if it exists
+        if (screen.frameInterval) {
+            clearInterval(screen.frameInterval);
+            screen.frameInterval = null;
+        }
+
+        // Notify others if we're live
+        if (isLive) {
+            room.send({
+                type: "stopScreenShare",
+                screenId: screenId,
+                clientId: room.party.client.id
+            });
+        }
+        
         // Stop all tracks
         screen.stream.getTracks().forEach(track => track.stop());
         screen.video.srcObject = null;
@@ -173,6 +197,7 @@ function toggleLive() {
         screens.forEach(screen => {
             if (screen.recording) {
                 sendScreenData(screen.id);
+                setupFrameCapture(screen.id);
             }
         });
     } else {
@@ -181,8 +206,17 @@ function toggleLive() {
         
         // Stop sending screen data
         screens.forEach(screen => {
-            // Could add logic to stop sending if needed
+            if (screen.frameInterval) {
+                clearInterval(screen.frameInterval);
+                screen.frameInterval = null;
+            }
         });
+        
+        // Clear remote screens
+        remoteScreens.forEach(screen => {
+            screen.element.remove();
+        });
+        remoteScreens = [];
     }
 }
 
@@ -202,8 +236,7 @@ function sendScreenData(screenId) {
     const screen = screens.find(s => s.id === screenId);
     
     if (screen && screen.recording && isLive) {
-        // For now, we just send a notification that the screen is being shared
-        // In a real implementation, we might use WebRTC to share the actual video stream
+        // Send initial notification that the screen is being shared
         room.send({
             type: "screenShare",
             screenId: screenId,
@@ -214,12 +247,140 @@ function sendScreenData(screenId) {
     }
 }
 
-function updateRemoteScreens(data) {
-    // In a real implementation, this would handle incoming video streams
-    console.log(`Received screen share from ${data.username}:`, data);
+function setupFrameCapture(screenId) {
+    const screen = screens.find(s => s.id === screenId);
     
-    // Here we would add remote screens or update existing ones
-    // For now, we just log the event
+    if (screen && screen.recording && isLive) {
+        // Clear any existing interval
+        if (screen.frameInterval) {
+            clearInterval(screen.frameInterval);
+        }
+        
+        // Create a canvas to capture video frames
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Set up interval to capture and send frames
+        screen.frameInterval = setInterval(() => {
+            if (!screen.recording || !isLive) {
+                clearInterval(screen.frameInterval);
+                screen.frameInterval = null;
+                return;
+            }
+            
+            // Get video dimensions
+            const videoWidth = screen.video.videoWidth;
+            const videoHeight = screen.video.videoHeight;
+            
+            if (videoWidth && videoHeight) {
+                // Set canvas size to match video
+                canvas.width = videoWidth;
+                canvas.height = videoHeight;
+                
+                // Draw current video frame to canvas
+                ctx.drawImage(screen.video, 0, 0, canvas.width, canvas.height);
+                
+                // Get the frame as a data URL (JPEG for better compression)
+                const frameData = canvas.toDataURL('image/jpeg', 0.6);
+                
+                // Send the frame data
+                room.send({
+                    type: "screenFrame",
+                    screenId: screenId,
+                    clientId: room.party.client.id,
+                    username: room.party.client.username,
+                    frameData: frameData
+                });
+            }
+        }, 500); // Send frame every 500ms (adjust for performance)
+    }
+}
+
+function updateRemoteScreens(data) {
+    // Skip our own screens
+    if (data.clientId === room.party.client.id) return;
+    
+    // Check if we already have this remote screen
+    const existingScreen = remoteScreens.find(
+        s => s.clientId === data.clientId && s.screenId === data.screenId
+    );
+    
+    if (existingScreen) return; // Already have this screen
+    
+    // Create a new container for the remote screen
+    const screensContainer = document.getElementById('screens-container');
+    
+    const screenWrapper = document.createElement('div');
+    screenWrapper.className = 'screen-wrapper remote-screen';
+    screenWrapper.dataset.clientId = data.clientId;
+    screenWrapper.dataset.screenId = data.screenId;
+    
+    screenWrapper.innerHTML = `
+        <div class="screen-header">
+            <span class="grabber">⋮⋮</span>
+            <div class="screen-title">${data.title || `Screen from ${data.username}`}</div>
+            <div class="screen-controls">
+                <span class="screen-control-btn remote-username">${data.username}</span>
+                <button class="screen-control-btn close-btn" data-client-id="${data.clientId}" data-screen-id="${data.screenId}">×</button>
+            </div>
+        </div>
+        <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
+    `;
+    
+    screensContainer.appendChild(screenWrapper);
+    
+    // Add to our remote screens array
+    remoteScreens.push({
+        clientId: data.clientId,
+        screenId: data.screenId,
+        element: screenWrapper,
+        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`)
+    });
+    
+    // Setup event listener for close button
+    const closeBtn = screenWrapper.querySelector('.close-btn');
+    closeBtn.addEventListener('click', () => {
+        removeRemoteScreen({
+            clientId: data.clientId,
+            screenId: data.screenId
+        });
+    });
+    
+    // Setup drag events
+    screenWrapper.setAttribute('draggable', 'true');
+    screenWrapper.addEventListener('dragstart', handleDragStart);
+    screenWrapper.addEventListener('dragend', handleDragEnd);
+}
+
+function updateRemoteScreenFrame(data) {
+    // Skip our own frames
+    if (data.clientId === room.party.client.id) return;
+    
+    // Find the remote screen
+    const remoteScreen = remoteScreens.find(
+        s => s.clientId === data.clientId && s.screenId === data.screenId
+    );
+    
+    if (remoteScreen && remoteScreen.imageElement) {
+        // Update the image with the new frame
+        remoteScreen.imageElement.src = data.frameData;
+    } else {
+        // If we don't have this screen yet, create it
+        updateRemoteScreens(data);
+    }
+}
+
+function removeRemoteScreen(data) {
+    const index = remoteScreens.findIndex(
+        s => s.clientId === data.clientId && s.screenId === data.screenId
+    );
+    
+    if (index !== -1) {
+        // Remove from DOM
+        remoteScreens[index].element.remove();
+        // Remove from array
+        remoteScreens.splice(index, 1);
+    }
 }
 
 // Drag and drop functionality
@@ -286,4 +447,3 @@ function getDragAfterElement(container, y, x) {
         }
     }, { element: null, distance: Number.POSITIVE_INFINITY }).element;
 }
-
