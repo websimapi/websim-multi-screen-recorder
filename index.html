@@ -2,22 +2,90 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Screen Recorder</title>
+    <title>Screen Sharing Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Multi-Screen Recorder</h1>
-            <div class="control-panel">
-                <button id="addScreenBtn" class="btn">Add Screen</button>
-                <button id="goLiveBtn" class="btn btn-live">Go Live</button>
-                <div id="connectionStatus" class="status">Offline</div>
+    <div class="sidebar">
+        <div class="logo">ScreenShare</div>
+        <div class="nav-item active" data-page="home">
+            <i class="fas fa-home"></i>
+            <span>Home</span>
+        </div>
+        <div class="nav-item" data-page="myScreens">
+            <i class="fas fa-desktop"></i>
+            <span>My Screens</span>
+        </div>
+        <div class="status-indicator">
+            <div id="connectionStatus" class="status">Offline</div>
+        </div>
+    </div>
+    
+    <div class="main-content">
+        <!-- Home Page -->
+        <div id="homePage" class="page active">
+            <h1 class="section-header">Live Users</h1>
+            <div id="liveUsersContainer" class="live-users-grid">
+                <!-- Live user cards will be added here -->
+                <p>No users are currently live</p>
             </div>
         </div>
         
-        <div id="screens-container" class="screens-container">
-            <!-- Screen containers will be added here dynamically -->
+        <!-- My Screens Page -->
+        <div id="myScreensPage" class="page">
+            <div class="header">
+                <h1>My Screens</h1>
+                <div class="control-panel">
+                    <button id="addScreenBtn" class="btn">Add Screen</button>
+                    <button id="goLiveBtn" class="btn btn-live">Go Live</button>
+                </div>
+            </div>
+            
+            <div id="screens-container" class="screens-container">
+                <!-- Screen containers will be added here dynamically -->
+            </div>
+        </div>
+        
+        <!-- View User Page -->
+        <div id="viewUserPage" class="page">
+            <div class="back-btn" id="backToHomeBtn">
+                <i class="fas fa-arrow-left"></i> Back to Home
+            </div>
+            
+            <div class="header">
+                <div class="user-info">
+                    <img class="avatar" src="" alt="">
+                    <h1 id="viewingUserName">User's Screens</h1>
+                </div>
+            </div>
+            
+            <div class="view-layout">
+                <div class="screens-view">
+                    <div id="viewScreensContainer" class="screens-container">
+                        <!-- Remote screens will be added here -->
+                    </div>
+                </div>
+                
+                <div class="chat-panel">
+                    <div class="chat-header">
+                        <span>Live Chat</span>
+                    </div>
+                    <div class="chat-messages" id="chatMessages">
+                        <!-- Chat messages will appear here -->
+                    </div>
+                    <form class="chat-input-area" id="chatForm">
+                        <input 
+                            type="text" 
+                            class="chat-input" 
+                            id="chatInput" 
+                            placeholder="Type a message..."
+                            autocomplete="off"
+                        >
+                        <button type="submit" class="btn">Send</button>
+                    </form>
+                </div>
+            </div>
         </div>
     </div>
     
