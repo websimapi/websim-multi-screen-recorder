@@ -496,7 +496,7 @@ function toggleAudio(screenId) {
     
     if (audioTracks.length > 0) {
         const isEnabled = !audioTracks[0].enabled;
-!        audioTracks[0].enabled = isEnabled;
+        audioTracks[0].enabled = isEnabled;
         audioBtn.classList.toggle('active', isEnabled);
     }
 }
