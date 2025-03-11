@@ -10,6 +10,7 @@ let currentPage = 'home'; // Current active page: 'home', 'myScreens', 'viewUser
 let targetFPS = 24; // Target frames per second
 let streamQuality = 0.5; // Default quality (0.1-1.0)
 let adaptiveQuality = true; // Adapt quality based on performance
+let currentMainScreen = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     const addScreenBtn = document.getElementById('addScreenBtn');
@@ -23,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const liveUsersContainer = document.getElementById('liveUsersContainer');
     const qualitySlider = document.getElementById('qualitySlider');
     const fpsIndicator = document.getElementById('fpsIndicator');
+    const toggleChatBtn = document.getElementById('toggleChatBtn');
     
     // Initialize WebSocket connection
     room = new WebsimSocket();
@@ -184,6 +186,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }, 1000);
+    
+    // Add toggle chat button functionality
+    if (toggleChatBtn) {
+        toggleChatBtn.addEventListener('click', toggleChatPanel);
+    }
 });
 
 function navigateTo(page, userId = null) {
@@ -230,10 +237,31 @@ function viewUserScreens(userId) {
         userNameElement.textContent = user.username;
     }
     
+    // Update user avatar
+    const userAvatar = document.querySelector('#viewUserPage .user-info .avatar');
+    if (userAvatar) {
+        userAvatar.src = `https://images.websim.ai/avatar/${user.username}`;
+        userAvatar.alt = user.username;
+    }
+    
     // Clear existing screens from this user
     remoteScreens = remoteScreens.filter(screen => screen.clientId !== userId);
-    const viewScreensContainer = document.getElementById('viewScreensContainer');
-    viewScreensContainer.innerHTML = '';
+    
+    // Clear the view containers
+    const screensCarousel = document.getElementById('screensCarousel');
+    if (screensCarousel) {
+        screensCarousel.innerHTML = '';
+    }
+    
+    // Clear main screen view
+    const mainScreenView = document.getElementById('mainScreenView');
+    if (mainScreenView) {
+        mainScreenView.src = '';
+    }
+    const mainScreenAudio = document.getElementById('mainScreenAudio');
+    if (mainScreenAudio) {
+        mainScreenAudio.srcObject = null;
+    }
     
     // Clear chat messages
     const chatMessages = document.getElementById('chatMessages');
@@ -710,67 +738,93 @@ function updateRemoteScreens(data) {
     
     if (existingScreen) {
         // If the screen exists but might need to be updated
-        existingScreen.element.querySelector('.screen-title').textContent = 
-            data.title || `Screen from ${data.username}`;
+        if (existingScreen.thumbnailElement) {
+            existingScreen.thumbnailElement.querySelector('.thumbnail-title').textContent = 
+                data.title || `Screen from ${data.username}`;
+        }
         
         // Update audio status if provided
         if (data.hasAudio !== undefined) {
             existingScreen.hasAudio = data.hasAudio;
-            const audioIndicator = existingScreen.element.querySelector('.audio-indicator');
-            if (audioIndicator) {
-                audioIndicator.style.display = data.hasAudio ? 'inline-block' : 'none';
-            }
         }
         return;
     }
     
-    // Determine the container to add the screen to
-    let screensContainer;
-    if (currentPage === 'viewUser') {
-        screensContainer = document.getElementById('viewScreensContainer');
-    } else {
-        return; // Don't add screens when not in view mode
-    }
+    // If not in view mode, don't add screens
+    if (currentPage !== 'viewUser') return;
     
-    // Create a new container for the remote screen
-    const screenWrapper = document.createElement('div');
-    screenWrapper.className = 'screen-wrapper remote-screen';
-    screenWrapper.dataset.clientId = data.clientId;
-    screenWrapper.dataset.screenId = data.screenId;
+    // Create a thumbnail for the carousel
+    const screensCarousel = document.getElementById('screensCarousel');
+    if (!screensCarousel) return;
     
-    screenWrapper.innerHTML = `
-        <div class="screen-header">
-            <span class="grabber">⋮⋮</span>
-            <div class="screen-title">${data.title || `Screen from ${data.username}`}</div>
-            <div class="screen-controls">
-                <span class="audio-indicator" style="display: ${data.hasAudio ? 'inline-block' : 'none'}">
-                    <i class="fas fa-volume-up"></i>
-                </span>
-                <span class="screen-control-btn remote-username">${data.username}</span>
-            </div>
-        </div>
-        <div class="video-container">
-            <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
-            ${data.hasAudio ? `<audio id="remote-audio-${data.clientId}-${data.screenId}" autoplay></audio>` : ''}
-        </div>
+    const thumbnail = document.createElement('div');
+    thumbnail.className = 'screen-thumbnail';
+    thumbnail.dataset.clientId = data.clientId;
+    thumbnail.dataset.screenId = data.screenId;
+    
+    thumbnail.innerHTML = `
+        <img class="screen-thumbnail-img" src="https://images.websim.ai/avatar/${data.username}" alt="${data.title || `Screen from ${data.username}`}">
+        <div class="thumbnail-title">${data.title || `Screen from ${data.username}`}</div>
     `;
     
-    screensContainer.appendChild(screenWrapper);
+    screensCarousel.appendChild(thumbnail);
     
-    // Add to our remote screens array
-    remoteScreens.push({
+    // Add screen to remote screens array
+    const newScreen = {
         clientId: data.clientId,
         screenId: data.screenId,
-        element: screenWrapper,
-        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`),
-        audioElement: data.hasAudio ? screenWrapper.querySelector(`#remote-audio-${data.clientId}-${data.screenId}`) : null,
-        hasAudio: data.hasAudio || false
+        thumbnailElement: thumbnail,
+        frameBuffer: [],
+        hasAudio: data.hasAudio || false,
+        title: data.title || `Screen from ${data.username}`
+    };
+    
+    remoteScreens.push(newScreen);
+    
+    // Add click handler to switch to this screen
+    thumbnail.addEventListener('click', () => {
+        switchMainScreen(data.clientId, data.screenId);
+        
+        // Update active class
+        document.querySelectorAll('.screen-thumbnail').forEach(thumb => {
+            thumb.classList.remove('active');
+        });
+        thumbnail.classList.add('active');
     });
     
-    // Setup drag events
-    screenWrapper.setAttribute('draggable', 'true');
-    screenWrapper.addEventListener('dragstart', handleDragStart);
-    screenWrapper.addEventListener('dragend', handleDragEnd);
+    // If this is the first screen, set it as the main screen
+    if (remoteScreens.length === 1) {
+        switchMainScreen(data.clientId, data.screenId);
+        thumbnail.classList.add('active');
+    }
+}
+
+function switchMainScreen(clientId, screenId) {
+    const screen = remoteScreens.find(
+        s => s.clientId === clientId && s.screenId === screenId
+    );
+    
+    if (!screen) return;
+    
+    const mainScreenView = document.getElementById('mainScreenView');
+    const mainScreenAudio = document.getElementById('mainScreenAudio');
+    
+    if (!mainScreenView) return;
+    
+    // If the screen has a current frame, display it
+    if (screen.thumbnailElement && screen.thumbnailElement.querySelector('img').src) {
+        mainScreenView.src = screen.thumbnailElement.querySelector('img').src;
+    }
+    
+    // If the screen has audio, set it
+    if (screen.hasAudio && screen.audioElement && screen.audioElement.srcObject) {
+        mainScreenAudio.srcObject = screen.audioElement.srcObject;
+    } else {
+        mainScreenAudio.srcObject = null;
+    }
+    
+    // Set the current main screen
+    currentMainScreen = { clientId, screenId };
 }
 
 function updateRemoteScreenFrame(data) {
@@ -782,56 +836,22 @@ function updateRemoteScreenFrame(data) {
         s => s.clientId === data.clientId && s.screenId === data.screenId
     );
     
-    if (remoteScreen && remoteScreen.imageElement) {
-        // Initialize frame buffer if it doesn't exist
-        if (!remoteScreen.frameBuffer) {
-            remoteScreen.frameBuffer = [];
-            remoteScreen.lastRenderTime = 0;
-            
-            // Set up frame rendering loop
-            const renderNextFrame = () => {
-                if (!remoteScreen.frameBuffer || remoteScreen.frameBuffer.length === 0) {
-                    remoteScreen.animationFrameId = requestAnimationFrame(renderNextFrame);
-                    return;
-                }
-                
-                const now = performance.now();
-                // Render at targetFPS
-                if (now - remoteScreen.lastRenderTime >= (1000 / targetFPS)) {
-                    // Get the next frame
-                    const frameData = remoteScreen.frameBuffer.shift();
-                    
-                    // Update the image
-                    if (frameData && remoteScreen.imageElement) {
-                        remoteScreen.imageElement.src = frameData.frameData;
-                        
-                        // Set explicit dimensions if provided
-                        if (frameData.width && frameData.height) {
-                            // Maintain aspect ratio with CSS
-                            remoteScreen.imageElement.style.width = '100%';
-                            remoteScreen.imageElement.style.height = '100%';
-                            remoteScreen.imageElement.style.objectFit = 'contain';
-                        }
-                    }
-                    
-                    remoteScreen.lastRenderTime = now;
-                }
-                
-                // Continue the loop
-                remoteScreen.animationFrameId = requestAnimationFrame(renderNextFrame);
-            };
-            
-            // Start the rendering loop
-            remoteScreen.animationFrameId = requestAnimationFrame(renderNextFrame);
+    if (remoteScreen && remoteScreen.thumbnailElement) {
+        // Update the thumbnail
+        const thumbnailImg = remoteScreen.thumbnailElement.querySelector('.screen-thumbnail-img');
+        if (thumbnailImg) {
+            thumbnailImg.src = data.frameData;
         }
         
-        // Add frame to buffer with dimensions
-        if (remoteScreen.frameBuffer.length < targetFPS * 2) { // Limit buffer size
-            remoteScreen.frameBuffer.push({
-                frameData: data.frameData,
-                width: data.width,
-                height: data.height
-            });
+        // If this is the current main screen, update the main view
+        if (currentMainScreen && 
+            currentMainScreen.clientId === data.clientId && 
+            currentMainScreen.screenId === data.screenId) {
+            
+            const mainScreenView = document.getElementById('mainScreenView');
+            if (mainScreenView) {
+                mainScreenView.src = data.frameData;
+            }
         }
     } else if (currentPage === 'viewUser' && currentViewingUserId === data.clientId) {
         // If we don't have this screen yet but we're viewing this user, create it
@@ -845,98 +865,42 @@ function removeRemoteScreen(data) {
     );
     
     if (index !== -1) {
-        // Stop the rendering loop if it exists
-        if (remoteScreens[index].animationFrameId) {
-            cancelAnimationFrame(remoteScreens[index].animationFrameId);
+        // Remove the thumbnail
+        if (remoteScreens[index].thumbnailElement) {
+            remoteScreens[index].thumbnailElement.remove();
         }
         
-        // Remove from DOM
-        remoteScreens[index].element.remove();
         // Remove from array
         remoteScreens.splice(index, 1);
-    }
-}
-
-// Drag and drop functionality
-function setupDragAndDrop() {
-    const screensContainer = document.getElementById('screens-container');
-    const viewScreensContainer = document.getElementById('viewScreensContainer');
-    
-    const setupDragForContainer = (container) => {
-        if (!container) return;
         
-        container.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            const draggable = document.querySelector('.is-dragging');
+        // If this was the main screen, switch to another if available
+        if (currentMainScreen && 
+            currentMainScreen.clientId === data.clientId && 
+            currentMainScreen.screenId === data.screenId) {
             
-            if (!draggable) return;
-            
-            // Find the closest screen element we're dragging over
-            const afterElement = getDragAfterElement(container, e.clientY, e.clientX);
-            
-            if (afterElement == null) {
-                container.appendChild(draggable);
+            if (remoteScreens.length > 0) {
+                const nextScreen = remoteScreens[0];
+                switchMainScreen(nextScreen.clientId, nextScreen.screenId);
+                
+                // Update active thumbnail
+                const thumbnail = document.querySelector(`.screen-thumbnail[data-client-id="${nextScreen.clientId}"][data-screen-id="${nextScreen.screenId}"]`);
+                if (thumbnail) {
+                    thumbnail.classList.add('active');
+                }
             } else {
-                container.insertBefore(draggable, afterElement);
+                // No screens left, clear main view
+                const mainScreenView = document.getElementById('mainScreenView');
+                if (mainScreenView) {
+                    mainScreenView.src = '';
+                }
+                const mainScreenAudio = document.getElementById('mainScreenAudio');
+                if (mainScreenAudio) {
+                    mainScreenAudio.srcObject = null;
+                }
+                currentMainScreen = null;
             }
-        });
-    };
-    
-    // Setup drag for both containers
-    setupDragForContainer(screensContainer);
-    setupDragForContainer(viewScreensContainer);
-}
-
-function handleDragStart(e) {
-    e.target.classList.add('is-dragging');
-    e.dataTransfer.effectAllowed = 'move';
-    
-    // Different data attributes for local vs remote screens
-    if (e.target.dataset.id) {
-        e.dataTransfer.setData('text/plain', e.target.dataset.id);
-    } else {
-        e.dataTransfer.setData('text/plain', `${e.target.dataset.clientId}-${e.target.dataset.screenId}`);
-    }
-    
-    // Create a ghost drag image
-    const dragImage = e.target.cloneNode(true);
-    dragImage.style.opacity = '0.5';
-    dragImage.style.position = 'absolute';
-    dragImage.style.top = '-1000px';
-    document.body.appendChild(dragImage);
-    e.dataTransfer.setDragImage(dragImage, 0, 0);
-    
-    // Remove the ghost image after drag
-    setTimeout(() => {
-        document.body.removeChild(dragImage);
-    }, 0);
-}
-
-function handleDragEnd(e) {
-    e.target.classList.remove('is-dragging');
-    
-    // Remove any placeholder
-    const placeholder = document.querySelector('.drag-placeholder');
-    if (placeholder) placeholder.remove();
-}
-
-function getDragAfterElement(container, y, x) {
-    const draggableElements = [...container.querySelectorAll('.screen-wrapper:not(.is-dragging)')];
-    
-    return draggableElements.reduce((closest, child) => {
-        const box = child.getBoundingClientRect();
-        const offsetY = y - box.top - box.height / 2;
-        const offsetX = x - box.left - box.width / 2;
-        
-        // Calculate distance from center
-        const distance = Math.sqrt(offsetY * offsetY + offsetX * offsetX);
-        
-        if (distance < closest.distance) {
-            return { element: child, distance: distance };
-        } else {
-            return closest;
         }
-    }, { element: null, distance: Number.POSITIVE_INFINITY }).element;
+    }
 }
 
 // Live users management
@@ -1150,4 +1114,101 @@ function handleAudioCandidate(data) {
             remoteScreen.audioConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
         }
     }
+}
+
+function toggleChatPanel() {
+    const chatPanel = document.querySelector('.chat-panel');
+    const screensView = document.querySelector('.screens-view');
+    
+    if (chatPanel.style.display === 'none') {
+        chatPanel.style.display = 'flex';
+        if (window.innerWidth >= 1024) {
+            screensView.style.flex = '3';
+        }
+    } else {
+        chatPanel.style.display = 'none';
+        screensView.style.flex = '1';
+    }
+}
+
+// Drag and drop functionality
+function setupDragAndDrop() {
+    const screensContainer = document.getElementById('screens-container');
+    const viewScreensContainer = document.getElementById('viewScreensContainer');
+    
+    const setupDragForContainer = (container) => {
+        if (!container) return;
+        
+        container.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            const draggable = document.querySelector('.is-dragging');
+            
+            if (!draggable) return;
+            
+            // Find the closest screen element we're dragging over
+            const afterElement = getDragAfterElement(container, e.clientY, e.clientX);
+            
+            if (afterElement == null) {
+                container.appendChild(draggable);
+            } else {
+                container.insertBefore(draggable, afterElement);
+            }
+        });
+    };
+    
+    // Setup drag for both containers
+    setupDragForContainer(screensContainer);
+    setupDragForContainer(viewScreensContainer);
+}
+
+function handleDragStart(e) {
+    e.target.classList.add('is-dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    
+    // Different data attributes for local vs remote screens
+    if (e.target.dataset.id) {
+        e.dataTransfer.setData('text/plain', e.target.dataset.id);
+    } else {
+        e.dataTransfer.setData('text/plain', `${e.target.dataset.clientId}-${e.target.dataset.screenId}`);
+    }
+    
+    // Create a ghost drag image
+    const dragImage = e.target.cloneNode(true);
+    dragImage.style.opacity = '0.5';
+    dragImage.style.position = 'absolute';
+    dragImage.style.top = '-1000px';
+    document.body.appendChild(dragImage);
+    e.dataTransfer.setDragImage(dragImage, 0, 0);
+    
+    // Remove the ghost image after drag
+    setTimeout(() => {
+        document.body.removeChild(dragImage);
+    }, 0);
+}
+
+function handleDragEnd(e) {
+    e.target.classList.remove('is-dragging');
+    
+    // Remove any placeholder
+    const placeholder = document.querySelector('.drag-placeholder');
+    if (placeholder) placeholder.remove();
+}
+
+function getDragAfterElement(container, y, x) {
+    const draggableElements = [...container.querySelectorAll('.screen-wrapper:not(.is-dragging)')];
+    
+    return draggableElements.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        const offsetY = y - box.top - box.height / 2;
+        const offsetX = x - box.left - box.width / 2;
+        
+        // Calculate distance from center
+        const distance = Math.sqrt(offsetY * offsetY + offsetX * offsetX);
+        
+        if (distance < closest.distance) {
+            return { element: child, distance: distance };
+        } else {
+            return closest;
+        }
+    }, { element: null, distance: Number.POSITIVE_INFINITY }).element;
 }
