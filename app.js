@@ -212,10 +212,17 @@ function viewUserScreens(userId) {
         chatMessages.innerHTML = '';
     }
     
+    // Update the user avatar
+    const userAvatar = document.querySelector('#viewUserPage .avatar');
+    if (userAvatar) {
+        userAvatar.src = `https://images.websim.ai/avatar/${user.username}`;
+        userAvatar.alt = user.username;
+    }
+    
     // Back button handler
     const backBtn = document.getElementById('backToHomeBtn');
     if (backBtn) {
-        backBtn.addEventListener('click', () => navigateTo('home'));
+        backBtn.onclick = () => navigateTo('home');
     }
     
     // Request screen updates from the viewed user
@@ -492,7 +499,7 @@ function setupFrameCapture(screenId) {
                 // Get the frame as a data URL (JPEG for better compression)
                 const frameData = canvas.toDataURL('image/jpeg', 0.6);
                 
-                // Send the frame data
+                // Send the frame data to all peers
                 room.send({
                     type: "screenFrame",
                     screenId: screenId,
@@ -507,7 +514,7 @@ function setupFrameCapture(screenId) {
 
 function updateRemoteScreens(data) {
     // Skip our own screens
-    if (data.clientId === room.party.client.id) return;
+    if (data.clientId === room.party.client.id && !data.targetClientId) return;
     
     // If we're not viewing this user's screens, return
     if (currentPage === 'viewUser' && currentViewingUserId !== data.clientId) return;
@@ -584,7 +591,7 @@ function updateRemoteScreens(data) {
 
 function updateRemoteScreenFrame(data) {
     // Skip our own frames
-    if (data.clientId === room.party.client.id) return;
+    if (data.clientId === room.party.client.id && !data.targetClientId) return;
     
     // Create buffer key for this screen
     const bufferKey = `${data.clientId}-${data.screenId}`;
