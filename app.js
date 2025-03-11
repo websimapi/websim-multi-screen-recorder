@@ -35,8 +35,8 @@ document.addEventListener('DOMContentLoaded', () => {
             screens: []
         });
         
-        // Process initial presence data immediately
-        handlePresenceUpdates(room.party.presence);
+        // Check for live users immediately after connection
+        setTimeout(refreshLiveUsers, 500);
     };
 
     room.onclose = () => {
@@ -432,8 +432,31 @@ function setupFrameCapture(screenId) {
 }
 
 function refreshLiveUsers() {
-    // Process current presence data immediately
-    handlePresenceUpdates(room.party.presence);
+    // Check current presence data for live users
+    const allPresence = room.party.presence;
+    
+    liveUsers.clear();
+    
+    // Process presence data to find live users
+    for (const clientId in allPresence) {
+        const userData = allPresence[clientId];
+        const peerUser = room.party.peers[clientId];
+        
+        // Skip ourselves
+        if (clientId === room.party.client.id) continue;
+        
+        // If user is live, add to live users
+        if (userData && userData.isLive) {
+            liveUsers.set(clientId, {
+                clientId,
+                username: peerUser?.username || userData.username || "Unknown User",
+                preview: userData.preview || null,
+                screens: userData.screens || []
+            });
+        }
+    }
+    
+    renderLiveUsers();
     
     // If we're viewing a user, check if they're still live
     if (currentViewingUserId && !liveUsers.has(currentViewingUserId)) {
@@ -448,7 +471,7 @@ function handlePresenceUpdates(allPresence) {
     // Loop through all users' presence data
     for (const clientId in allPresence) {
         const userData = allPresence[clientId];
-        const peer = room.party.peers[clientId];
+        const peerUser = room.party.peers[clientId];
         
         // Skip ourselves
         if (clientId === room.party.client.id) continue;
@@ -457,7 +480,7 @@ function handlePresenceUpdates(allPresence) {
         if (userData.isLive) {
             liveUsers.set(clientId, {
                 clientId,
-                username: peer?.username || userData.username || "Unknown User",
+                username: peerUser?.username || userData.username || "Unknown User",
                 preview: userData.preview || null,
                 screens: userData.screens || []
             });
