@@ -220,6 +220,13 @@ function viewUserScreens(userId) {
         userNameElement.textContent = user.username;
     }
     
+    // Update user avatar
+    const userAvatar = document.querySelector('#viewUserPage .avatar');
+    if (userAvatar) {
+        userAvatar.src = `https://images.websim.ai/avatar/${user.username}`;
+        userAvatar.alt = user.username;
+    }
+    
     // Clear existing screens from this user
     remoteScreens = remoteScreens.filter(screen => screen.clientId !== userId);
     const viewScreensContainer = document.getElementById('viewScreensContainer');
@@ -235,6 +242,17 @@ function viewUserScreens(userId) {
     const backBtn = document.getElementById('backToHomeBtn');
     if (backBtn) {
         backBtn.addEventListener('click', () => navigateTo('home'));
+    }
+    
+    // Immediately load any existing screens from presence data
+    const presenceData = room.party.presence[userId];
+    if (presenceData && presenceData.screens) {
+        for (const screenId in presenceData.screens) {
+            const screenData = presenceData.screens[screenId];
+            if (screenData && screenData.active) {
+                updateRemoteScreenFromPresence(userId, screenId, screenData);
+            }
+        }
     }
 }
 
@@ -888,7 +906,27 @@ function refreshLiveUsers() {
         if (presenceData.isLive) {
             // Add this user to live users if not already there
             if (!liveUsers.has(clientId)) {
-                addLiveUser(clientId, presenceData.username);
+                addLiveUser(clientId, presenceData.username || room.party.peers[clientId]?.username);
+            }
+            
+            // Update screens info from presence
+            if (presenceData.screens) {
+                const activeScreens = Object.keys(presenceData.screens).filter(
+                    screenId => presenceData.screens[screenId].active
+                );
+                
+                if (liveUsers.has(clientId)) {
+                    const user = liveUsers.get(clientId);
+                    user.screens = activeScreens;
+                    
+                    // Update preview if available
+                    if (activeScreens.length > 0) {
+                        const firstScreenData = presenceData.screens[activeScreens[0]];
+                        if (firstScreenData.frameData) {
+                            user.preview = firstScreenData.frameData;
+                        }
+                    }
+                }
             }
         }
     }
