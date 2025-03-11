@@ -496,7 +496,7 @@ function toggleAudio(screenId) {
     
     if (audioTracks.length > 0) {
         const isEnabled = !audioTracks[0].enabled;
-        audioTracks[0].enabled = isEnabled;
+!        audioTracks[0].enabled = isEnabled;
         audioBtn.classList.toggle('active', isEnabled);
     }
 }
@@ -748,7 +748,7 @@ function updateRemoteScreens(data) {
             </div>
         </div>
         <div class="video-container">
-            <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
+            <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" style="display:block;" />
             ${data.hasAudio ? `<audio id="remote-audio-${data.clientId}-${data.screenId}" autoplay></audio>` : ''}
         </div>
     `;
@@ -806,6 +806,20 @@ function updateRemoteScreenFrame(data) {
                     
                     // Update the image
                     if (frame && remoteScreen.imageElement) {
+                        // Set a fixed size if we don't have one yet
+                        if (!remoteScreen.frameStats.frameSize.width) {
+                            const img = new Image();
+                            img.onload = () => {
+                                remoteScreen.frameStats.frameSize = {
+                                    width: img.width,
+                                    height: img.height
+                                };
+                                // Set fixed dimensions to prevent shifting
+                                remoteScreen.imageElement.style.width = `${img.width}px`;
+                                remoteScreen.imageElement.style.height = `${img.height}px`;
+                            };
+                            img.src = frame;
+                        }
                         remoteScreen.imageElement.src = frame;
                     }
                     
