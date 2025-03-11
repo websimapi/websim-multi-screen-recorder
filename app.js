@@ -523,8 +523,9 @@ function setupFrameCapture(screenId) {
             droppedFrames: 0,
             adaptiveScaleFactor: 0.4,
             consecutiveSlowFrames: 0,
-            canvasWidth: 0,
-            canvasHeight: 0
+            // Store original dimensions once to maintain consistency
+            originalWidth: screen.video.videoWidth || 1280,
+            originalHeight: screen.video.videoHeight || 720
         };
         
         // Setup audio streaming if available
@@ -548,28 +549,34 @@ function setupFrameCapture(screenId) {
             
             // Only capture if enough time has elapsed since last frame
             if (elapsed >= frameInterval) {
-                // Get video dimensions
-                const videoWidth = screen.video.videoWidth;
-                const videoHeight = screen.video.videoHeight;
+                // Get video dimensions or use the stored ones
+                const videoWidth = screen.video.videoWidth || screen.frameStats.originalWidth;
+                const videoHeight = screen.video.videoHeight || screen.frameStats.originalHeight;
+                
+                // Store original dimensions if they're not yet set
+                if (!screen.frameStats.originalWidth && videoWidth) {
+                    screen.frameStats.originalWidth = videoWidth;
+                    screen.frameStats.originalHeight = videoHeight;
+                }
                 
                 if (videoWidth && videoHeight) {
                     // Use adaptive scaling based on performance
                     let scaleFactor = screen.frameStats.adaptiveScaleFactor;
                     
-                    // Calculate scaled dimensions
-                    const scaledWidth = Math.floor(videoWidth * scaleFactor);
-                    const scaledHeight = Math.floor(videoHeight * scaleFactor);
+                    // Calculate scaled dimensions - ensure they're integers to avoid pixel misalignment
+                    const scaledWidth = Math.floor(screen.frameStats.originalWidth * scaleFactor);
+                    const scaledHeight = Math.floor(screen.frameStats.originalHeight * scaleFactor);
                     
-                    // Only resize the canvas when dimensions change to prevent shifting
-                    if (screen.frameStats.canvasWidth !== scaledWidth || 
-                        screen.frameStats.canvasHeight !== scaledHeight) {
+                    // Always maintain the same canvas dimensions once set
+                    if (canvas.width !== scaledWidth) {
                         canvas.width = scaledWidth;
                         canvas.height = scaledHeight;
-                        screen.frameStats.canvasWidth = scaledWidth;
-                        screen.frameStats.canvasHeight = scaledHeight;
                     }
                     
-                    // Draw current video frame to canvas with scaling
+                    // Clear canvas before drawing to prevent artifacts
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Draw current video frame to canvas with consistent dimensions
                     ctx.drawImage(screen.video, 0, 0, scaledWidth, scaledHeight);
                     
                     // Calculate current quality based on performance
@@ -792,21 +799,19 @@ function updateRemoteScreenFrame(data) {
                 // Render at targetFPS
                 if (now - remoteScreen.lastRenderTime >= (1000 / targetFPS)) {
                     // Get the next frame
-                    const frame = remoteScreen.frameBuffer.shift();
+                    const frameData = remoteScreen.frameBuffer.shift();
                     
                     // Update the image
-                    if (frame && remoteScreen.imageElement) {
-                        // Apply fixed dimensions if provided
-                        if (frame.width && frame.height) {
-                            remoteScreen.imageElement.width = frame.width;
-                            remoteScreen.imageElement.height = frame.height;
-                            remoteScreen.imageElement.style.width = 'auto';
-                            remoteScreen.imageElement.style.height = 'auto';
-                            remoteScreen.imageElement.style.maxWidth = '100%';
-                            remoteScreen.imageElement.style.maxHeight = '300px';
+                    if (frameData && remoteScreen.imageElement) {
+                        remoteScreen.imageElement.src = frameData.frameData;
+                        
+                        // Set explicit dimensions if provided
+                        if (frameData.width && frameData.height) {
+                            // Maintain aspect ratio with CSS
+                            remoteScreen.imageElement.style.width = '100%';
+                            remoteScreen.imageElement.style.height = '100%';
                             remoteScreen.imageElement.style.objectFit = 'contain';
                         }
-                        remoteScreen.imageElement.src = frame.frameData;
                     }
                     
                     remoteScreen.lastRenderTime = now;
