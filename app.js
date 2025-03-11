@@ -7,7 +7,6 @@ let remoteScreens = []; // Track screens from other users
 let liveUsers = new Map(); // Track live users and their screens
 let currentViewingUserId = null; // Currently viewing user
 let currentPage = 'home'; // Current active page: 'home', 'myScreens', 'viewUser'
-let videoBuffers = new Map(); // To store video frame buffers for each remote screen
 
 document.addEventListener('DOMContentLoaded', () => {
     const addScreenBtn = document.getElementById('addScreenBtn');
@@ -91,24 +90,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         type: "goLive",
                         clientId: room.party.client.id,
                         username: room.party.client.username
-                    });
-                }
-                break;
-            case 'requestScreenUpdates':
-                // If we are live, resend all our screen data to the requesting client
-                if (isLive) {
-                    screens.forEach(screen => {
-                        if (screen.recording) {
-                            // Resend screen share data
-                            room.send({
-                                type: "screenShare",
-                                screenId: screen.id,
-                                clientId: room.party.client.id,
-                                username: room.party.client.username,
-                                title: `Screen ${screen.id} from ${room.party.client.username}`,
-                                targetClientId: data.clientId
-                            });
-                        }
                     });
                 }
                 break;
@@ -212,35 +193,10 @@ function viewUserScreens(userId) {
         chatMessages.innerHTML = '';
     }
     
-    // Update the user avatar
-    const userAvatar = document.querySelector('#viewUserPage .avatar');
-    if (userAvatar) {
-        userAvatar.src = `https://images.websim.ai/avatar/${user.username}`;
-        userAvatar.alt = user.username;
-    }
-    
     // Back button handler
     const backBtn = document.getElementById('backToHomeBtn');
     if (backBtn) {
-        backBtn.onclick = () => navigateTo('home');
-    }
-    
-    // Request screen updates from the viewed user
-    room.send({
-        type: "requestScreenUpdates",
-        targetClientId: userId,
-        clientId: room.party.client.id
-    });
-    
-    // Reset video buffers for this user
-    for (const key of videoBuffers.keys()) {
-        if (key.startsWith(userId)) {
-            const buffer = videoBuffers.get(key);
-            if (buffer.bufferInterval) {
-                clearInterval(buffer.bufferInterval);
-            }
-            videoBuffers.delete(key);
-        }
+        backBtn.addEventListener('click', () => navigateTo('home'));
     }
 }
 
@@ -489,17 +445,22 @@ function setupFrameCapture(screenId) {
             const videoHeight = screen.video.videoHeight;
             
             if (videoWidth && videoHeight) {
-                // Set canvas size to match video
-                canvas.width = videoWidth;
-                canvas.height = videoHeight;
+                // Calculate scaled dimensions (reduce resolution by 60%)
+                const scaleFactor = 0.4; 
+                const scaledWidth = Math.floor(videoWidth * scaleFactor);
+                const scaledHeight = Math.floor(videoHeight * scaleFactor);
                 
-                // Draw current video frame to canvas
-                ctx.drawImage(screen.video, 0, 0, canvas.width, canvas.height);
+                // Set canvas size to scaled dimensions
+                canvas.width = scaledWidth;
+                canvas.height = scaledHeight;
                 
-                // Get the frame as a data URL (JPEG for better compression)
-                const frameData = canvas.toDataURL('image/jpeg', 0.6);
+                // Draw current video frame to canvas with scaling
+                ctx.drawImage(screen.video, 0, 0, scaledWidth, scaledHeight);
                 
-                // Send the frame data to all peers
+                // Get the frame as a data URL (JPEG with higher compression)
+                const frameData = canvas.toDataURL('image/jpeg', 0.4);
+                
+                // Send the frame data
                 room.send({
                     type: "screenFrame",
                     screenId: screenId,
@@ -508,13 +469,13 @@ function setupFrameCapture(screenId) {
                     frameData: frameData
                 });
             }
-        }, 500); // Send frame every 500ms (adjust for performance)
+        }, 1000); 
     }
 }
 
 function updateRemoteScreens(data) {
     // Skip our own screens
-    if (data.clientId === room.party.client.id && !data.targetClientId) return;
+    if (data.clientId === room.party.client.id) return;
     
     // If we're not viewing this user's screens, return
     if (currentPage === 'viewUser' && currentViewingUserId !== data.clientId) return;
@@ -551,7 +512,6 @@ function updateRemoteScreens(data) {
             <div class="screen-title">${data.title || `Screen from ${data.username}`}</div>
             <div class="screen-controls">
                 <span class="screen-control-btn remote-username">${data.username}</span>
-                <span class="buffer-status" id="buffer-status-${data.clientId}-${data.screenId}">Buffering...</span>
             </div>
         </div>
         <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
@@ -559,82 +519,33 @@ function updateRemoteScreens(data) {
     
     screensContainer.appendChild(screenWrapper);
     
-    // Initialize buffer for this screen
-    const bufferKey = `${data.clientId}-${data.screenId}`;
-    if (!videoBuffers.has(bufferKey)) {
-        videoBuffers.set(bufferKey, {
-            frames: [],
-            lastDisplayedFrame: 0,
-            playing: false,
-            bufferSize: 5, // Number of frames to buffer before starting playback
-            bufferInterval: null
-        });
-    }
-    
     // Add to our remote screens array
     remoteScreens.push({
         clientId: data.clientId,
         screenId: data.screenId,
         element: screenWrapper,
-        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`),
-        bufferStatus: screenWrapper.querySelector(`#buffer-status-${data.clientId}-${data.screenId}`)
+        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`)
     });
     
     // Setup drag events
     screenWrapper.setAttribute('draggable', 'true');
     screenWrapper.addEventListener('dragstart', handleDragStart);
     screenWrapper.addEventListener('dragend', handleDragEnd);
-    
-    // Start buffer playback
-    startBufferPlayback(bufferKey);
 }
 
 function updateRemoteScreenFrame(data) {
     // Skip our own frames
-    if (data.clientId === room.party.client.id && !data.targetClientId) return;
-    
-    // Create buffer key for this screen
-    const bufferKey = `${data.clientId}-${data.screenId}`;
-    
-    // Add frame to buffer
-    if (!videoBuffers.has(bufferKey)) {
-        videoBuffers.set(bufferKey, {
-            frames: [],
-            lastDisplayedFrame: 0,
-            playing: false,
-            bufferSize: 5, // Number of frames to buffer before starting playback
-            bufferInterval: null
-        });
-    }
-    
-    // Add the frame to the buffer
-    videoBuffers.get(bufferKey).frames.push({
-        frameData: data.frameData,
-        timestamp: Date.now()
-    });
+    if (data.clientId === room.party.client.id) return;
     
     // Find the remote screen
     const remoteScreen = remoteScreens.find(
         s => s.clientId === data.clientId && s.screenId === data.screenId
     );
     
-    if (remoteScreen) {
-        // Update buffer status
-        const bufferSize = videoBuffers.get(bufferKey).frames.length;
-        const minBufferSize = videoBuffers.get(bufferKey).bufferSize;
-        
-        if (remoteScreen.bufferStatus) {
-            if (bufferSize < minBufferSize) {
-                remoteScreen.bufferStatus.textContent = `Buffering (${bufferSize}/${minBufferSize})...`;
-                remoteScreen.bufferStatus.style.display = 'inline';
-            } else {
-                remoteScreen.bufferStatus.style.display = 'none';
-            }
-        }
-        
-        // Start playback if not already started
-        if (!videoBuffers.get(bufferKey).playing) {
-            startBufferPlayback(bufferKey);
+    if (remoteScreen && remoteScreen.imageElement) {
+        // Set image directly without triggering layout recalculation
+        if (remoteScreen.imageElement.currentSrc !== data.frameData) {
+            remoteScreen.imageElement.src = data.frameData;
         }
     } else if (currentPage === 'viewUser' && currentViewingUserId === data.clientId) {
         // If we don't have this screen yet but we're viewing this user, create it
@@ -648,97 +559,11 @@ function removeRemoteScreen(data) {
     );
     
     if (index !== -1) {
-        // Stop buffer playback
-        const bufferKey = `${data.clientId}-${data.screenId}`;
-        if (videoBuffers.has(bufferKey)) {
-            const buffer = videoBuffers.get(bufferKey);
-            if (buffer.bufferInterval) {
-                clearInterval(buffer.bufferInterval);
-            }
-            videoBuffers.delete(bufferKey);
-        }
-        
         // Remove from DOM
         remoteScreens[index].element.remove();
         // Remove from array
         remoteScreens.splice(index, 1);
     }
-}
-
-function startBufferPlayback(bufferKey) {
-    // Get the buffer for this screen
-    const buffer = videoBuffers.get(bufferKey);
-    if (!buffer) return;
-    
-    // Already playing
-    if (buffer.playing && buffer.bufferInterval) return;
-    
-    // Find the corresponding remote screen
-    const [clientId, screenId] = bufferKey.split('-');
-    const remoteScreen = remoteScreens.find(
-        s => s.clientId === clientId && s.screenId === parseInt(screenId)
-    );
-    
-    if (!remoteScreen) return;
-    
-    // Set playing flag
-    buffer.playing = true;
-    
-    // Start buffer playback interval
-    buffer.bufferInterval = setInterval(() => {
-        // Check if we have enough frames buffered to start playing
-        if (buffer.frames.length < buffer.bufferSize && buffer.lastDisplayedFrame === 0) {
-            // Not enough frames yet, wait for more
-            if (remoteScreen.bufferStatus) {
-                remoteScreen.bufferStatus.textContent = 
-                    `Buffering (${buffer.frames.length}/${buffer.bufferSize})...`;
-                remoteScreen.bufferStatus.style.display = 'inline';
-            }
-            return;
-        }
-        
-        // Hide buffer status once we start playing
-        if (remoteScreen.bufferStatus) {
-            remoteScreen.bufferStatus.style.display = 'none';
-        }
-        
-        // Display the next frame
-        if (buffer.frames.length > buffer.lastDisplayedFrame) {
-            const frame = buffer.frames[buffer.lastDisplayedFrame];
-            if (remoteScreen.imageElement) {
-                remoteScreen.imageElement.src = frame.frameData;
-            }
-            buffer.lastDisplayedFrame++;
-            
-            // If we've reached the end of our buffer but more frames are coming in
-            // maintain a good buffer size before continuing
-            if (buffer.lastDisplayedFrame >= buffer.frames.length - 2) {
-                // Keep the last 2 frames for history
-                if (buffer.frames.length > buffer.bufferSize + 2) {
-                    buffer.frames = buffer.frames.slice(-buffer.bufferSize - 2);
-                    buffer.lastDisplayedFrame = 2; // Reset to show the oldest frame in our new buffer
-                }
-            }
-        }
-    }, 500); // Match the frame rate from sender
-}
-
-// Add function to restart video buffering when a viewer joins
-function restartAllBuffers() {
-    // Stop all existing buffer playbacks
-    videoBuffers.forEach((buffer, key) => {
-        if (buffer.bufferInterval) {
-            clearInterval(buffer.bufferInterval);
-            buffer.bufferInterval = null;
-        }
-        
-        // Reset buffer to start playback from the beginning
-        buffer.playing = false;
-        buffer.lastDisplayedFrame = 0;
-        
-        // Start playback again
-        startBufferPlayback(key);
-    });
 }
 
 // Drag and drop functionality
