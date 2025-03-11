@@ -77,6 +77,29 @@ body {
     gap: 10px;
 }
 
+.quality-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 10px;
+    padding: 5px 10px;
+    background-color: #2a2a2a;
+    border-radius: 4px;
+}
+
+.quality-slider {
+    width: 80px;
+    accent-color: #2a6cbd;
+}
+
+.fps-indicator {
+    padding: 3px 6px;
+    background-color: #333;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #ccc;
+}
+
 .btn {
     padding: 8px 16px;
     background-color: #2a6cbd;

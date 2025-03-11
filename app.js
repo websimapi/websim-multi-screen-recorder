@@ -7,6 +7,9 @@ let remoteScreens = []; // Track screens from other users
 let liveUsers = new Map(); // Track live users and their screens
 let currentViewingUserId = null; // Currently viewing user
 let currentPage = 'home'; // Current active page: 'home', 'myScreens', 'viewUser'
+let targetFPS = 24; // Target frames per second
+let streamQuality = 0.5; // Default quality (0.1-1.0)
+let adaptiveQuality = true; // Adapt quality based on performance
 
 document.addEventListener('DOMContentLoaded', () => {
     const addScreenBtn = document.getElementById('addScreenBtn');
@@ -18,6 +21,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatInput = document.getElementById('chatInput');
     const chatMessages = document.getElementById('chatMessages');
     const liveUsersContainer = document.getElementById('liveUsersContainer');
+    const qualitySlider = document.getElementById('qualitySlider');
+    const fpsIndicator = document.getElementById('fpsIndicator');
     
     // Initialize WebSocket connection
     room = new WebsimSocket();
@@ -136,6 +141,40 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Set initial active page
     navigateTo('home');
+    
+    // Handle quality slider changes
+    if (qualitySlider) {
+        qualitySlider.addEventListener('input', (e) => {
+            streamQuality = parseFloat(e.target.value);
+        });
+    }
+    
+    // Setup FPS indicator update
+    setInterval(() => {
+        if (fpsIndicator && screens.length > 0) {
+            let totalFps = 0;
+            let screenCount = 0;
+            
+            screens.forEach(screen => {
+                if (screen.frameStats && screen.recording) {
+                    totalFps += screen.frameStats.fps;
+                    screenCount++;
+                }
+            });
+            
+            const avgFps = screenCount > 0 ? Math.round(totalFps / screenCount) : 0;
+            fpsIndicator.textContent = `${avgFps} FPS`;
+            
+            // Visual indicator of performance
+            if (avgFps >= targetFPS) {
+                fpsIndicator.style.backgroundColor = '#16a34a';
+            } else if (avgFps >= targetFPS * 0.7) {
+                fpsIndicator.style.backgroundColor = '#ca8a04';
+            } else {
+                fpsIndicator.style.backgroundColor = '#e22626';
+            }
+        }
+    }, 1000);
 });
 
 function navigateTo(page, userId = null) {
@@ -293,6 +332,12 @@ function stopCapture(screenId) {
     const screen = screens.find(s => s.id === screenId);
     
     if (screen && screen.stream) {
+        // Stop animation frame if it exists
+        if (screen.animationFrameId) {
+            cancelAnimationFrame(screen.animationFrameId);
+            screen.animationFrameId = null;
+        }
+        
         // Stop frame capture interval if it exists
         if (screen.frameInterval) {
             clearInterval(screen.frameInterval);
@@ -313,6 +358,8 @@ function stopCapture(screenId) {
         screen.video.srcObject = null;
         screen.stream = null;
         screen.recording = false;
+        screen.frameBuffer = null;
+        screen.frameStats = null;
         
         // Update UI
         const recordBtn = screen.element.querySelector('.record-btn');
@@ -432,44 +479,124 @@ function setupFrameCapture(screenId) {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         
-        // Set up interval to capture and send frames
-        screen.frameInterval = setInterval(() => {
+        // Initialize frame buffer and statistics
+        screen.frameBuffer = [];
+        screen.frameStats = {
+            lastFrameTime: performance.now(),
+            frameCount: 0,
+            fps: 0,
+            droppedFrames: 0,
+            adaptiveScaleFactor: 0.4,
+            consecutiveSlowFrames: 0
+        };
+        
+        // Calculate frame interval based on target FPS
+        const frameInterval = 1000 / targetFPS;
+        
+        // Set up requestAnimationFrame loop instead of interval
+        const captureFrame = () => {
             if (!screen.recording || !isLive) {
-                clearInterval(screen.frameInterval);
-                screen.frameInterval = null;
+                screen.frameStats = null;
+                screen.frameBuffer = null;
                 return;
             }
             
-            // Get video dimensions
-            const videoWidth = screen.video.videoWidth;
-            const videoHeight = screen.video.videoHeight;
+            const now = performance.now();
+            const elapsed = now - screen.frameStats.lastFrameTime;
             
-            if (videoWidth && videoHeight) {
-                // Calculate scaled dimensions (reduce resolution by 60%)
-                const scaleFactor = 0.4; 
-                const scaledWidth = Math.floor(videoWidth * scaleFactor);
-                const scaledHeight = Math.floor(videoHeight * scaleFactor);
+            // Only capture if enough time has elapsed since last frame
+            if (elapsed >= frameInterval) {
+                // Get video dimensions
+                const videoWidth = screen.video.videoWidth;
+                const videoHeight = screen.video.videoHeight;
                 
-                // Set canvas size to scaled dimensions
-                canvas.width = scaledWidth;
-                canvas.height = scaledHeight;
-                
-                // Draw current video frame to canvas with scaling
-                ctx.drawImage(screen.video, 0, 0, scaledWidth, scaledHeight);
-                
-                // Get the frame as a data URL (JPEG with higher compression)
-                const frameData = canvas.toDataURL('image/jpeg', 0.4);
-                
-                // Send the frame data
+                if (videoWidth && videoHeight) {
+                    // Use adaptive scaling based on performance
+                    let scaleFactor = screen.frameStats.adaptiveScaleFactor;
+                    
+                    // Calculate scaled dimensions
+                    const scaledWidth = Math.floor(videoWidth * scaleFactor);
+                    const scaledHeight = Math.floor(videoHeight * scaleFactor);
+                    
+                    // Set canvas size to scaled dimensions
+                    canvas.width = scaledWidth;
+                    canvas.height = scaledHeight;
+                    
+                    // Draw current video frame to canvas with scaling
+                    ctx.drawImage(screen.video, 0, 0, scaledWidth, scaledHeight);
+                    
+                    // Calculate current quality based on performance
+                    let quality = streamQuality;
+                    if (adaptiveQuality && screen.frameStats.consecutiveSlowFrames > 5) {
+                        quality = Math.max(0.2, quality - 0.1);
+                        screen.frameStats.adaptiveScaleFactor = Math.max(0.2, scaleFactor - 0.05);
+                        screen.frameStats.consecutiveSlowFrames = 0;
+                    } else if (adaptiveQuality && screen.frameStats.fps >= targetFPS && screen.frameStats.frameCount % 30 === 0) {
+                        quality = Math.min(0.8, quality + 0.05);
+                        screen.frameStats.adaptiveScaleFactor = Math.min(0.6, scaleFactor + 0.02);
+                    }
+                    
+                    // Get the frame as a data URL (JPEG with compression)
+                    const frameData = canvas.toDataURL('image/jpeg', quality);
+                    
+                    // Add to frame buffer
+                    screen.frameBuffer.push({
+                        timestamp: now,
+                        data: frameData,
+                        screenId: screenId,
+                        clientId: room.party.client.id,
+                        username: room.party.client.username
+                    });
+                    
+                    // Keep buffer size reasonable
+                    if (screen.frameBuffer.length > targetFPS) {
+                        screen.frameBuffer.shift();
+                    }
+                    
+                    // Update stats
+                    screen.frameStats.frameCount++;
+                    const fpsWindow = 1000; // Calculate FPS over 1 second
+                    if (now - screen.frameStats.lastFrameTime > fpsWindow) {
+                        screen.frameStats.fps = (screen.frameStats.frameCount * 1000) / (now - screen.frameStats.lastFrameTime);
+                        screen.frameStats.lastFrameTime = now;
+                        screen.frameStats.frameCount = 0;
+                    }
+                    
+                    // If frame took too long, increment slow frames counter
+                    if (elapsed > frameInterval * 1.5) {
+                        screen.frameStats.consecutiveSlowFrames++;
+                    } else {
+                        screen.frameStats.consecutiveSlowFrames = 0;
+                    }
+                }
+            }
+            
+            // Request next frame
+            screen.animationFrameId = requestAnimationFrame(captureFrame);
+        };
+        
+        // Start the animation frame loop
+        screen.animationFrameId = requestAnimationFrame(captureFrame);
+        
+        // Set up separate interval to send buffered frames
+        screen.frameInterval = setInterval(() => {
+            if (!screen.recording || !isLive || !screen.frameBuffer || screen.frameBuffer.length === 0) {
+                return;
+            }
+            
+            // Send oldest frame from buffer
+            const frame = screen.frameBuffer.shift();
+            if (frame) {
                 room.send({
                     type: "screenFrame",
-                    screenId: screenId,
-                    clientId: room.party.client.id,
-                    username: room.party.client.username,
-                    frameData: frameData
+                    screenId: frame.screenId,
+                    clientId: frame.clientId,
+                    username: frame.username,
+                    frameData: frame.data,
+                    timestamp: frame.timestamp
                 });
             }
-        }, 1000); 
+        }, 1000 / 15); // Send at a lower rate than capture
     }
 }
 
@@ -543,9 +670,43 @@ function updateRemoteScreenFrame(data) {
     );
     
     if (remoteScreen && remoteScreen.imageElement) {
-        // Set image directly without triggering layout recalculation
-        if (remoteScreen.imageElement.currentSrc !== data.frameData) {
-            remoteScreen.imageElement.src = data.frameData;
+        // Initialize frame buffer if it doesn't exist
+        if (!remoteScreen.frameBuffer) {
+            remoteScreen.frameBuffer = [];
+            remoteScreen.lastRenderTime = 0;
+            
+            // Set up frame rendering loop
+            const renderNextFrame = () => {
+                if (!remoteScreen.frameBuffer || remoteScreen.frameBuffer.length === 0) {
+                    remoteScreen.animationFrameId = requestAnimationFrame(renderNextFrame);
+                    return;
+                }
+                
+                const now = performance.now();
+                // Render at targetFPS
+                if (now - remoteScreen.lastRenderTime >= (1000 / targetFPS)) {
+                    // Get the next frame
+                    const frame = remoteScreen.frameBuffer.shift();
+                    
+                    // Update the image
+                    if (frame && remoteScreen.imageElement) {
+                        remoteScreen.imageElement.src = frame;
+                    }
+                    
+                    remoteScreen.lastRenderTime = now;
+                }
+                
+                // Continue the loop
+                remoteScreen.animationFrameId = requestAnimationFrame(renderNextFrame);
+            };
+            
+            // Start the rendering loop
+            remoteScreen.animationFrameId = requestAnimationFrame(renderNextFrame);
+        }
+        
+        // Add frame to buffer
+        if (remoteScreen.frameBuffer.length < targetFPS * 2) { // Limit buffer size
+            remoteScreen.frameBuffer.push(data.frameData);
         }
     } else if (currentPage === 'viewUser' && currentViewingUserId === data.clientId) {
         // If we don't have this screen yet but we're viewing this user, create it
@@ -559,6 +720,11 @@ function removeRemoteScreen(data) {
     );
     
     if (index !== -1) {
+        // Stop the rendering loop if it exists
+        if (remoteScreens[index].animationFrameId) {
+            cancelAnimationFrame(remoteScreens[index].animationFrameId);
+        }
+        
         // Remove from DOM
         remoteScreens[index].element.remove();
         // Remove from array
