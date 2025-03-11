@@ -523,8 +523,10 @@ function setupFrameCapture(screenId) {
             droppedFrames: 0,
             adaptiveScaleFactor: 0.4,
             consecutiveSlowFrames: 0,
-            originalWidth: 0,
-            originalHeight: 0
+            videoSize: {
+                width: 0,
+                height: 0
+            }
         };
         
         // Setup audio streaming if available
@@ -553,22 +555,26 @@ function setupFrameCapture(screenId) {
                 const videoHeight = screen.video.videoHeight;
                 
                 if (videoWidth && videoHeight) {
-                    // Store original dimensions on first frame
-                    if (screen.frameStats.originalWidth === 0) {
-                        screen.frameStats.originalWidth = videoWidth;
-                        screen.frameStats.originalHeight = videoHeight;
+                    // Only resize canvas if video dimensions change
+                    if (screen.frameStats.videoSize.width !== videoWidth || 
+                        screen.frameStats.videoSize.height !== videoHeight) {
+                        screen.frameStats.videoSize.width = videoWidth;
+                        screen.frameStats.videoSize.height = videoHeight;
                     }
                     
                     // Use adaptive scaling based on performance
                     let scaleFactor = screen.frameStats.adaptiveScaleFactor;
                     
-                    // Calculate scaled dimensions
+                    // Calculate scaled dimensions - maintain aspect ratio
                     const scaledWidth = Math.floor(videoWidth * scaleFactor);
                     const scaledHeight = Math.floor(videoHeight * scaleFactor);
                     
                     // Set canvas size to scaled dimensions
                     canvas.width = scaledWidth;
                     canvas.height = scaledHeight;
+                    
+                    // Clear canvas first
+                    ctx.clearRect(0, 0, scaledWidth, scaledHeight);
                     
                     // Draw current video frame to canvas with scaling
                     ctx.drawImage(screen.video, 0, 0, scaledWidth, scaledHeight);
@@ -594,8 +600,7 @@ function setupFrameCapture(screenId) {
                         screenId: screenId,
                         clientId: room.party.client.id,
                         username: room.party.client.username,
-                        width: scaledWidth,
-                        height: scaledHeight
+                        dimensions: {width: scaledWidth, height: scaledHeight}
                     });
                     
                     // Keep buffer size reasonable
@@ -644,8 +649,7 @@ function setupFrameCapture(screenId) {
                     username: frame.username,
                     frameData: frame.data,
                     timestamp: frame.timestamp,
-                    width: frame.width,
-                    height: frame.height
+                    dimensions: frame.dimensions
                 });
             }
         }, 1000 / 15); // Send at a lower rate than capture
@@ -758,10 +762,7 @@ function updateRemoteScreens(data) {
         element: screenWrapper,
         imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`),
         audioElement: data.hasAudio ? screenWrapper.querySelector(`#remote-audio-${data.clientId}-${data.screenId}`) : null,
-        hasAudio: data.hasAudio || false,
-        originalAspectRatio: null,
-        width: 0,
-        height: 0
+        hasAudio: data.hasAudio || false
     });
     
     // Setup drag events
@@ -784,6 +785,11 @@ function updateRemoteScreenFrame(data) {
         if (!remoteScreen.frameBuffer) {
             remoteScreen.frameBuffer = [];
             remoteScreen.lastRenderTime = 0;
+            remoteScreen.frameStats = {
+                lastFrameTime: performance.now(),
+                frameCount: 0,
+                frameSize: { width: 0, height: 0 }
+            };
             
             // Set up frame rendering loop
             const renderNextFrame = () => {
@@ -798,31 +804,9 @@ function updateRemoteScreenFrame(data) {
                     // Get the next frame
                     const frame = remoteScreen.frameBuffer.shift();
                     
-                    // Create a temporary image to get dimensions
+                    // Update the image
                     if (frame && remoteScreen.imageElement) {
-                        if (!remoteScreen.originalAspectRatio) {
-                            const tempImg = new Image();
-                            tempImg.onload = () => {
-                                // Store original aspect ratio
-                                remoteScreen.originalAspectRatio = tempImg.width / tempImg.height;
-                                remoteScreen.width = tempImg.width;
-                                remoteScreen.height = tempImg.height;
-                                
-                                // Set container size to maintain aspect ratio
-                                const container = remoteScreen.element.querySelector('.video-container');
-                                if (container) {
-                                    container.style.paddingTop = `${(1 / remoteScreen.originalAspectRatio) * 100}%`;
-                                    container.style.height = 'auto';
-                                }
-                                
-                                // Apply the frame
-                                remoteScreen.imageElement.src = frame;
-                            };
-                            tempImg.src = frame;
-                        } else {
-                            // Just update the image with correct dimensions
-                            remoteScreen.imageElement.src = frame;
-                        }
+                        remoteScreen.imageElement.src = frame;
                     }
                     
                     remoteScreen.lastRenderTime = now;
