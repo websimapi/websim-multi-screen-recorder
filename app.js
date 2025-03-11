@@ -98,6 +98,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                 }
                 break;
+            case 'audioOffer':
+                handleAudioOffer(data);
+                break;
+            case 'audioAnswer':
+                handleAudioAnswer(data);
+                break;
+            case 'audioCandidate':
+                handleAudioCandidate(data);
+                break;
         }
     };
 
@@ -255,10 +264,11 @@ function addNewScreen() {
             <div class="screen-controls">
                 <button class="screen-control-btn record-btn" data-id="${screenId}">Record</button>
                 <button class="screen-control-btn stop-btn" data-id="${screenId}" disabled>Stop</button>
+                <button class="screen-control-btn audio-btn" data-id="${screenId}"><i class="fas fa-volume-up"></i></button>
                 <button class="screen-control-btn close-btn" data-id="${screenId}">×</button>
             </div>
         </div>
-        <video class="screen-video" id="video-${screenId}" autoplay muted></video>
+        <video class="screen-video" id="video-${screenId}" autoplay></video>
     `;
     
     screensContainer.appendChild(screenWrapper);
@@ -270,17 +280,20 @@ function addNewScreen() {
         video: screenWrapper.querySelector(`#video-${screenId}`),
         stream: null,
         recording: false,
-        frameInterval: null
+        frameInterval: null,
+        hasAudio: false
     });
     
     // Setup event listeners for this screen
     const recordBtn = screenWrapper.querySelector('.record-btn');
     const stopBtn = screenWrapper.querySelector('.stop-btn');
     const closeBtn = screenWrapper.querySelector('.close-btn');
+    const audioBtn = screenWrapper.querySelector('.audio-btn');
     
     recordBtn.addEventListener('click', () => startCapture(screenId));
     stopBtn.addEventListener('click', () => stopCapture(screenId));
     closeBtn.addEventListener('click', () => removeScreen(screenId));
+    audioBtn.addEventListener('click', () => toggleAudio(screenId));
     
     // Setup drag events for this screen
     screenWrapper.addEventListener('dragstart', handleDragStart);
@@ -291,12 +304,12 @@ async function startCapture(screenId) {
     try {
         const screen = screens.find(s => s.id === screenId);
         
-        // Request display media
+        // Request display media with audio
         const stream = await navigator.mediaDevices.getDisplayMedia({
             video: {
                 cursor: "always"
             },
-            audio: false
+            audio: true // Enable audio capture
         });
         
         // Save the stream
@@ -305,12 +318,15 @@ async function startCapture(screenId) {
         
         // Display the stream
         screen.video.srcObject = stream;
+        screen.video.muted = false; // Unmute to hear audio locally
         
         // Update UI
         const recordBtn = screen.element.querySelector('.record-btn');
         const stopBtn = screen.element.querySelector('.stop-btn');
+        const audioBtn = screen.element.querySelector('.audio-btn');
         recordBtn.disabled = true;
         stopBtn.disabled = false;
+        if (audioBtn) audioBtn.classList.toggle('active', stream.getAudioTracks().length > 0);
         
         // Handle stream ending
         stream.getVideoTracks()[0].addEventListener('ended', () => {
@@ -455,14 +471,33 @@ function sendScreenData(screenId) {
     const screen = screens.find(s => s.id === screenId);
     
     if (screen && screen.recording && isLive) {
+        // Check if there are audio tracks
+        const hasAudio = screen.stream.getAudioTracks().length > 0;
+        screen.hasAudio = hasAudio;
+        
         // Send initial notification that the screen is being shared
         room.send({
             type: "screenShare",
             screenId: screenId,
             clientId: room.party.client.id,
             username: room.party.client.username,
-            title: `Screen ${screenId} from ${room.party.client.username}`
+            title: `Screen ${screenId} from ${room.party.client.username}`,
+            hasAudio: hasAudio
         });
+    }
+}
+
+function toggleAudio(screenId) {
+    const screen = screens.find(s => s.id === screenId);
+    if (!screen || !screen.stream) return;
+    
+    const audioBtn = screen.element.querySelector('.audio-btn');
+    const audioTracks = screen.stream.getAudioTracks();
+    
+    if (audioTracks.length > 0) {
+        const isEnabled = !audioTracks[0].enabled;
+        audioTracks[0].enabled = isEnabled;
+        audioBtn.classList.toggle('active', isEnabled);
     }
 }
 
@@ -489,6 +524,11 @@ function setupFrameCapture(screenId) {
             adaptiveScaleFactor: 0.4,
             consecutiveSlowFrames: 0
         };
+        
+        // Setup audio streaming if available
+        if (screen.stream.getAudioTracks().length > 0) {
+            setupAudioStreaming(screen);
+        }
         
         // Calculate frame interval based on target FPS
         const frameInterval = 1000 / targetFPS;
@@ -600,6 +640,44 @@ function setupFrameCapture(screenId) {
     }
 }
 
+function setupAudioStreaming(screen) {
+    // Create peer connection for audio
+    screen.audioConnection = new RTCPeerConnection();
+    
+    // Add audio tracks to the connection
+    screen.stream.getAudioTracks().forEach(track => {
+        screen.audioConnection.addTrack(track, screen.stream);
+    });
+    
+    // Create data channel for signaling
+    screen.audioDataChannel = screen.audioConnection.createDataChannel('audio-signaling');
+    
+    // Create offer
+    screen.audioConnection.createOffer().then(offer => {
+        screen.audioConnection.setLocalDescription(offer);
+        
+        // Send offer to remote peers
+        room.send({
+            type: "audioOffer",
+            screenId: screen.id,
+            clientId: room.party.client.id,
+            sdp: offer.sdp
+        });
+    });
+    
+    // Handle ICE candidates
+    screen.audioConnection.onicecandidate = event => {
+        if (event.candidate) {
+            room.send({
+                type: "audioCandidate",
+                screenId: screen.id,
+                clientId: room.party.client.id,
+                candidate: event.candidate
+            });
+        }
+    };
+}
+
 function updateRemoteScreens(data) {
     // Skip our own screens
     if (data.clientId === room.party.client.id) return;
@@ -616,6 +694,15 @@ function updateRemoteScreens(data) {
         // If the screen exists but might need to be updated
         existingScreen.element.querySelector('.screen-title').textContent = 
             data.title || `Screen from ${data.username}`;
+        
+        // Update audio status if provided
+        if (data.hasAudio !== undefined) {
+            existingScreen.hasAudio = data.hasAudio;
+            const audioIndicator = existingScreen.element.querySelector('.audio-indicator');
+            if (audioIndicator) {
+                audioIndicator.style.display = data.hasAudio ? 'inline-block' : 'none';
+            }
+        }
         return;
     }
     
@@ -638,10 +725,16 @@ function updateRemoteScreens(data) {
             <span class="grabber">⋮⋮</span>
             <div class="screen-title">${data.title || `Screen from ${data.username}`}</div>
             <div class="screen-controls">
+                <span class="audio-indicator" style="display: ${data.hasAudio ? 'inline-block' : 'none'}">
+                    <i class="fas fa-volume-up"></i>
+                </span>
                 <span class="screen-control-btn remote-username">${data.username}</span>
             </div>
         </div>
-        <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
+        <div class="video-container">
+            <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
+            ${data.hasAudio ? `<audio id="remote-audio-${data.clientId}-${data.screenId}" autoplay></audio>` : ''}
+        </div>
     `;
     
     screensContainer.appendChild(screenWrapper);
@@ -651,7 +744,9 @@ function updateRemoteScreens(data) {
         clientId: data.clientId,
         screenId: data.screenId,
         element: screenWrapper,
-        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`)
+        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`),
+        audioElement: data.hasAudio ? screenWrapper.querySelector(`#remote-audio-${data.clientId}-${data.screenId}`) : null,
+        hasAudio: data.hasAudio || false
     });
     
     // Setup drag events
@@ -928,4 +1023,101 @@ function addChatMessage(username, message, isSelf = false) {
     
     chatMessages.appendChild(messageElement);
     chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function handleAudioOffer(data) {
+    // Skip our own offers
+    if (data.clientId === room.party.client.id) return;
+    
+    // Find the remote screen
+    const remoteScreen = remoteScreens.find(
+        s => s.clientId === data.clientId && s.screenId === data.screenId
+    );
+    
+    if (remoteScreen && remoteScreen.hasAudio) {
+        // Create peer connection if it doesn't exist
+        if (!remoteScreen.audioConnection) {
+            remoteScreen.audioConnection = new RTCPeerConnection();
+            
+            // Handle incoming tracks
+            remoteScreen.audioConnection.ontrack = event => {
+                if (remoteScreen.audioElement) {
+                    remoteScreen.audioElement.srcObject = new MediaStream([event.track]);
+                }
+            };
+            
+            // Handle ICE candidates
+            remoteScreen.audioConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    room.send({
+                        type: "audioCandidate",
+                        screenId: remoteScreen.screenId,
+                        clientId: room.party.client.id,
+                        targetClientId: remoteScreen.clientId,
+                        candidate: event.candidate
+                    });
+                }
+            };
+        }
+        
+        // Set remote description from offer
+        const offer = new RTCSessionDescription({
+            type: 'offer',
+            sdp: data.sdp
+        });
+        
+        remoteScreen.audioConnection.setRemoteDescription(offer)
+            .then(() => remoteScreen.audioConnection.createAnswer())
+            .then(answer => {
+                remoteScreen.audioConnection.setLocalDescription(answer);
+                
+                // Send answer back
+                room.send({
+                    type: "audioAnswer",
+                    screenId: remoteScreen.screenId,
+                    clientId: room.party.client.id,
+                    targetClientId: remoteScreen.clientId,
+                    sdp: answer.sdp
+                });
+            });
+    }
+}
+
+function handleAudioAnswer(data) {
+    // Skip answers not meant for us
+    if (data.targetClientId !== room.party.client.id) return;
+    
+    // Find our screen
+    const screen = screens.find(s => s.id === parseInt(data.screenId));
+    
+    if (screen && screen.audioConnection) {
+        // Set remote description from answer
+        const answer = new RTCSessionDescription({
+            type: 'answer',
+            sdp: data.sdp
+        });
+        
+        screen.audioConnection.setRemoteDescription(answer);
+    }
+}
+
+function handleAudioCandidate(data) {
+    // Handle candidate for host
+    if (data.targetClientId === room.party.client.id) {
+        const screen = screens.find(s => s.id === parseInt(data.screenId));
+        
+        if (screen && screen.audioConnection) {
+            screen.audioConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+    }
+    // Handle candidate for viewer
+    else if (data.clientId !== room.party.client.id) {
+        const remoteScreen = remoteScreens.find(
+            s => s.clientId === data.clientId && s.screenId === parseInt(data.screenId)
+        );
+        
+        if (remoteScreen && remoteScreen.audioConnection) {
+            remoteScreen.audioConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+        }
+    }
 }
