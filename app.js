@@ -522,7 +522,9 @@ function setupFrameCapture(screenId) {
             fps: 0,
             droppedFrames: 0,
             adaptiveScaleFactor: 0.4,
-            consecutiveSlowFrames: 0
+            consecutiveSlowFrames: 0,
+            lastWidth: 0,
+            lastHeight: 0
         };
         
         // Setup audio streaming if available
@@ -558,9 +560,15 @@ function setupFrameCapture(screenId) {
                     const scaledWidth = Math.floor(videoWidth * scaleFactor);
                     const scaledHeight = Math.floor(videoHeight * scaleFactor);
                     
-                    // Set canvas size to scaled dimensions
-                    canvas.width = scaledWidth;
-                    canvas.height = scaledHeight;
+                    // Only resize canvas if dimensions have changed significantly
+                    // This prevents unnecessary resizing which can cause jitter
+                    if (Math.abs(scaledWidth - screen.frameStats.lastWidth) > 4 || 
+                        Math.abs(scaledHeight - screen.frameStats.lastHeight) > 4) {
+                        canvas.width = scaledWidth;
+                        canvas.height = scaledHeight;
+                        screen.frameStats.lastWidth = scaledWidth;
+                        screen.frameStats.lastHeight = scaledHeight;
+                    }
                     
                     // Draw current video frame to canvas with scaling
                     ctx.drawImage(screen.video, 0, 0, scaledWidth, scaledHeight);
@@ -645,8 +653,10 @@ function setupAudioStreaming(screen) {
     screen.audioConnection = new RTCPeerConnection();
     
     // Add audio tracks to the connection
-    screen.stream.getAudioTracks().forEach(track => {
-        screen.audioConnection.addTrack(track, screen.stream);
+    screen.stream.getTracks().forEach(track => {
+        if (track.kind === 'audio') {
+            screen.audioConnection.addTrack(track, screen.stream);
+        }
     });
     
     // Create data channel for signaling
@@ -769,6 +779,34 @@ function updateRemoteScreenFrame(data) {
         if (!remoteScreen.frameBuffer) {
             remoteScreen.frameBuffer = [];
             remoteScreen.lastRenderTime = 0;
+            remoteScreen.frameCount = 0;
+            
+            // Preload the first image to get dimensions
+            const preloadImg = new Image();
+            preloadImg.onload = function() {
+                // Lock aspect ratio based on first frame
+                if (remoteScreen.imageElement) {
+                    const aspectRatio = preloadImg.width / preloadImg.height;
+                    remoteScreen.aspectRatio = aspectRatio;
+                    
+                    // Set fixed width and height on the container
+                    const container = remoteScreen.imageElement.parentElement;
+                    if (container) {
+                        container.style.position = 'relative';
+                        const containerWidth = container.offsetWidth;
+                        const containerHeight = 300; // Use fixed height as defined in CSS
+                        
+                        // Maintain aspect ratio without changing container size
+                        if (remoteScreen.imageElement.style) {
+                            remoteScreen.imageElement.style.width = 'auto';
+                            remoteScreen.imageElement.style.height = 'auto';
+                            remoteScreen.imageElement.style.maxWidth = '100%';
+                            remoteScreen.imageElement.style.maxHeight = '100%';
+                        }
+                    }
+                }
+            };
+            preloadImg.src = data.frameData;
             
             // Set up frame rendering loop
             const renderNextFrame = () => {
@@ -783,12 +821,24 @@ function updateRemoteScreenFrame(data) {
                     // Get the next frame
                     const frame = remoteScreen.frameBuffer.shift();
                     
-                    // Update the image
+                    // Update the image without changing its size
                     if (frame && remoteScreen.imageElement) {
-                        remoteScreen.imageElement.src = frame;
+                        // Keep the old image visible until the new one is loaded
+                        const oldSrc = remoteScreen.imageElement.src;
+                        
+                        // Only update if src actually changed
+                        if (oldSrc !== frame) {
+                            // Prefetch the image to avoid jittering
+                            const newImg = new Image();
+                            newImg.onload = function() {
+                                remoteScreen.imageElement.src = frame;
+                            };
+                            newImg.src = frame;
+                        }
                     }
                     
                     remoteScreen.lastRenderTime = now;
+                    remoteScreen.frameCount++;
                 }
                 
                 // Continue the loop
@@ -800,7 +850,11 @@ function updateRemoteScreenFrame(data) {
         }
         
         // Add frame to buffer
-        if (remoteScreen.frameBuffer.length < targetFPS * 2) { // Limit buffer size
+        if (remoteScreen.frameBuffer.length < targetFPS) { // Limit buffer size to reduce memory usage
+            remoteScreen.frameBuffer.push(data.frameData);
+        } else if (remoteScreen.frameBuffer.length > 0) {
+            // Replace the oldest frame if buffer is full
+            remoteScreen.frameBuffer.shift();
             remoteScreen.frameBuffer.push(data.frameData);
         }
     } else if (currentPage === 'viewUser' && currentViewingUserId === data.clientId) {
@@ -810,19 +864,10 @@ function updateRemoteScreenFrame(data) {
 }
 
 function removeRemoteScreen(data) {
-    const index = remoteScreens.findIndex(
-        s => s.clientId === data.clientId && s.screenId === data.screenId
-    );
-    
+    // Remove the remote screen
+    const index = remoteScreens.findIndex(s => s.clientId === data.clientId && s.screenId === data.screenId);
     if (index !== -1) {
-        // Stop the rendering loop if it exists
-        if (remoteScreens[index].animationFrameId) {
-            cancelAnimationFrame(remoteScreens[index].animationFrameId);
-        }
-        
-        // Remove from DOM
         remoteScreens[index].element.remove();
-        // Remove from array
         remoteScreens.splice(index, 1);
     }
 }
@@ -830,7 +875,7 @@ function removeRemoteScreen(data) {
 // Drag and drop functionality
 function setupDragAndDrop() {
     const screensContainer = document.getElementById('screens-container');
-    const viewScreensContainer = document.getElementById('viewScreensContainer');
+    const viewScreensContainer = document.getElementById('viewUserPage');
     
     const setupDragForContainer = (container) => {
         if (!container) return;
