@@ -35,8 +35,8 @@ document.addEventListener('DOMContentLoaded', () => {
             screens: []
         });
         
-        // Refresh live users when connection is established
-        setTimeout(refreshLiveUsers, 500);
+        // Process initial presence data immediately
+        handlePresenceUpdates(room.party.presence);
     };
 
     room.onclose = () => {
@@ -432,8 +432,8 @@ function setupFrameCapture(screenId) {
 }
 
 function refreshLiveUsers() {
-    // Now handled by presence system through handlePresenceUpdates
-    renderLiveUsers();
+    // Process current presence data immediately
+    handlePresenceUpdates(room.party.presence);
     
     // If we're viewing a user, check if they're still live
     if (currentViewingUserId && !liveUsers.has(currentViewingUserId)) {
@@ -448,6 +448,7 @@ function handlePresenceUpdates(allPresence) {
     // Loop through all users' presence data
     for (const clientId in allPresence) {
         const userData = allPresence[clientId];
+        const peer = room.party.peers[clientId];
         
         // Skip ourselves
         if (clientId === room.party.client.id) continue;
@@ -456,7 +457,7 @@ function handlePresenceUpdates(allPresence) {
         if (userData.isLive) {
             liveUsers.set(clientId, {
                 clientId,
-                username: room.party.peers[clientId]?.username || "Unknown User",
+                username: peer?.username || userData.username || "Unknown User",
                 preview: userData.preview || null,
                 screens: userData.screens || []
             });
