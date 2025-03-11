@@ -118,6 +118,15 @@ body {
     background-color: #16a34a;
 }
 
+.buffer-status {
+    background-color: #ff9800;
+    color: black;
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 5px;
+}
+
 .screens-container {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
@@ -398,4 +407,3 @@ body {
 .back-btn:hover {
     text-decoration: underline;
 }
-

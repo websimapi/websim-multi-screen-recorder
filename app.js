@@ -7,8 +7,7 @@ let remoteScreens = []; // Track screens from other users
 let liveUsers = new Map(); // Track live users and their screens
 let currentViewingUserId = null; // Currently viewing user
 let currentPage = 'home'; // Current active page: 'home', 'myScreens', 'viewUser'
-let lastSentFrames = new Map(); // Track last sent frames to reduce bandwidth
-let frameBuffer = new Map(); // Buffer for smoother playback
+let videoBuffers = new Map(); // To store video frame buffers for each remote screen
 
 document.addEventListener('DOMContentLoaded', () => {
     const addScreenBtn = document.getElementById('addScreenBtn');
@@ -53,18 +52,22 @@ document.addEventListener('DOMContentLoaded', () => {
         
         switch (data.type) {
             case 'screenShare':
-                // Handle screen share metadata (not frames)
-                updateRemoteScreensMetadata(data);
+                // Handle incoming screen share data
+                updateRemoteScreens(data);
+                updateLiveUser(data.clientId, data);
+                break;
+            case 'screenFrame':
+                // Handle incoming screen frame data
+                updateRemoteScreenFrame(data);
+                updateLiveUserPreview(data.clientId, data);
                 break;
             case 'stopScreenShare':
                 // Handle when a remote user stops sharing
                 removeRemoteScreen(data);
                 break;
             case 'goLive':
-                // Only handle initial broadcasts, presence will handle the rest
-                if (!liveUsers.has(data.clientId)) {
-                    addLiveUser(data.clientId, data.username);
-                }
+                // Handle when a user starts broadcasting
+                addLiveUser(data.clientId, data.username);
                 break;
             case 'stopLive':
                 // Handle when a user stops broadcasting
@@ -91,48 +94,26 @@ document.addEventListener('DOMContentLoaded', () => {
                     });
                 }
                 break;
+            case 'requestScreenUpdates':
+                // If we are live, resend all our screen data to the requesting client
+                if (isLive) {
+                    screens.forEach(screen => {
+                        if (screen.recording) {
+                            // Resend screen share data
+                            room.send({
+                                type: "screenShare",
+                                screenId: screen.id,
+                                clientId: room.party.client.id,
+                                username: room.party.client.username,
+                                title: `Screen ${screen.id} from ${room.party.client.username}`,
+                                targetClientId: data.clientId
+                            });
+                        }
+                    });
+                }
+                break;
         }
     };
-
-    // Subscribe to presence updates
-    room.party.subscribePresence((presence) => {
-        for (const clientId in presence) {
-            if (clientId === room.party.client.id) continue; // Skip our own presence
-            
-            const presenceData = presence[clientId];
-            if (presenceData.isLive && !liveUsers.has(clientId)) {
-                // Add live user if not already in our list
-                addLiveUser(clientId, presenceData.username || room.party.peers[clientId]?.username);
-            } else if (!presenceData.isLive && liveUsers.has(clientId)) {
-                // Remove live user if no longer broadcasting
-                removeLiveUser(clientId);
-            }
-            
-            // Process screen frames from presence data
-            if (presenceData.screens) {
-                let screenCount = 0;
-                Object.keys(presenceData.screens).forEach(screenId => {
-                    const screenData = presenceData.screens[screenId];
-                    if (screenData && screenData.active) {
-                        screenCount++;
-                        // Update remote screen or live user preview
-                        updateRemoteScreenFromPresence(clientId, screenId, screenData);
-                    }
-                });
-                
-                // Update screen count for this user
-                if (liveUsers.has(clientId)) {
-                    const user = liveUsers.get(clientId);
-                    user.screens = Object.keys(presenceData.screens).filter(
-                        screenId => presenceData.screens[screenId].active
-                    );
-                    renderLiveUsers();
-                }
-            }
-        }
-        
-        renderLiveUsers();
-    });
 
     // Setup navigation
     navItems.forEach(item => {
@@ -220,13 +201,6 @@ function viewUserScreens(userId) {
         userNameElement.textContent = user.username;
     }
     
-    // Update user avatar
-    const userAvatar = document.querySelector('#viewUserPage .avatar');
-    if (userAvatar) {
-        userAvatar.src = `https://images.websim.ai/avatar/${user.username}`;
-        userAvatar.alt = user.username;
-    }
-    
     // Clear existing screens from this user
     remoteScreens = remoteScreens.filter(screen => screen.clientId !== userId);
     const viewScreensContainer = document.getElementById('viewScreensContainer');
@@ -244,14 +218,21 @@ function viewUserScreens(userId) {
         backBtn.addEventListener('click', () => navigateTo('home'));
     }
     
-    // Immediately load any existing screens from presence data
-    const presenceData = room.party.presence[userId];
-    if (presenceData && presenceData.screens) {
-        for (const screenId in presenceData.screens) {
-            const screenData = presenceData.screens[screenId];
-            if (screenData && screenData.active) {
-                updateRemoteScreenFromPresence(userId, screenId, screenData);
+    // Request screen updates from the viewed user
+    room.send({
+        type: "requestScreenUpdates",
+        targetClientId: userId,
+        clientId: room.party.client.id
+    });
+    
+    // Reset video buffers for this user
+    for (const key of videoBuffers.keys()) {
+        if (key.startsWith(userId)) {
+            const buffer = videoBuffers.get(key);
+            if (buffer.bufferInterval) {
+                clearInterval(buffer.bufferInterval);
             }
+            videoBuffers.delete(key);
         }
     }
 }
@@ -399,68 +380,45 @@ function toggleLive() {
         goLiveBtn.textContent = 'Stop Live';
         goLiveBtn.classList.add('active');
         
-        // Create a screens object with all active screens
-        const screensPresence = {};
-        screens.forEach(screen => {
-            if (screen.recording) {
-                screensPresence[screen.id] = {
-                    title: `Screen ${screen.id} from ${room.party.client.username}`,
-                    active: true,
-                    timestamp: Date.now()
-                };
-                
-                // Start capturing frames for each active screen
-                setupFrameCapture(screen.id);
-            }
-        });
-        
-        // Update our presence to indicate we're live with all active screens
-        room.party.updatePresence({
-            isLive: true,
-            username: room.party.client.username,
-            screens: screensPresence
-        });
-        
-        // Broadcast that we're going live (for backward compatibility)
+        // Broadcast that we're going live
         room.send({
             type: "goLive",
             clientId: room.party.client.id,
             username: room.party.client.username
         });
+        
+        // Start sending screen data for each active screen
+        screens.forEach(screen => {
+            if (screen.recording) {
+                sendScreenData(screen.id);
+                setupFrameCapture(screen.id);
+            }
+        });
     } else {
         goLiveBtn.textContent = 'Go Live';
         goLiveBtn.classList.remove('active');
         
-        // Stop all screen capture intervals
+        // Broadcast that we're stopping live
+        room.send({
+            type: "stopLive",
+            clientId: room.party.client.id
+        });
+        
+        // Stop sending screen data
         screens.forEach(screen => {
             if (screen.frameInterval) {
                 clearInterval(screen.frameInterval);
                 screen.frameInterval = null;
             }
-        });
-        
-        // Create a screens object with all screens marked as inactive
-        const screensPresence = {};
-        if (room.party.presence[room.party.client.id]?.screens) {
-            // Get current screens presence and mark all as inactive
-            for (const screenId in room.party.presence[room.party.client.id].screens) {
-                screensPresence[screenId] = {
-                    ...room.party.presence[room.party.client.id].screens[screenId],
-                    active: false
-                };
+            
+            // Notify others that we've stopped sharing this screen
+            if (screen.recording) {
+                room.send({
+                    type: "stopScreenShare",
+                    screenId: screen.id,
+                    clientId: room.party.client.id
+                });
             }
-        }
-        
-        // Update our presence to indicate we're not live
-        room.party.updatePresence({
-            isLive: false,
-            screens: screensPresence
-        });
-        
-        // Broadcast that we're stopping live (for backward compatibility)
-        room.send({
-            type: "stopLive",
-            clientId: room.party.client.id
         });
         
         // Clear remote screens
@@ -468,10 +426,6 @@ function toggleLive() {
             screen.element.remove();
         });
         remoteScreens = [];
-        
-        // Clear frame tracking maps
-        lastSentFrames.clear();
-        frameBuffer.clear();
     }
 }
 
@@ -499,24 +453,6 @@ function sendScreenData(screenId) {
             username: room.party.client.username,
             title: `Screen ${screenId} from ${room.party.client.username}`
         });
-        
-        // Initialize the screens object in our presence if it doesn't exist
-        const currentPresence = room.party.presence[room.party.client.id] || {};
-        const screensPresence = currentPresence.screens || {};
-        
-        // Make sure to include all active screens in presence
-        let updatedScreensPresence = { ...screensPresence };
-        updatedScreensPresence[screenId] = {
-            title: `Screen ${screenId} from ${room.party.client.username}`,
-            active: true,
-            timestamp: Date.now()
-        };
-        
-        room.party.updatePresence({
-            isLive: true,
-            username: room.party.client.username,
-            screens: updatedScreensPresence
-        });
     }
 }
 
@@ -532,9 +468,6 @@ function setupFrameCapture(screenId) {
         // Create a canvas to capture video frames
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        
-        // Send initial screen data right away when starting capture
-        sendScreenData(screenId);
         
         // Set up interval to capture and send frames
         screen.frameInterval = setInterval(() => {
@@ -557,128 +490,22 @@ function setupFrameCapture(screenId) {
                 ctx.drawImage(screen.video, 0, 0, canvas.width, canvas.height);
                 
                 // Get the frame as a data URL (JPEG for better compression)
-                const frameData = canvas.toDataURL('image/jpeg', 0.5); // Reduced quality for better performance
+                const frameData = canvas.toDataURL('image/jpeg', 0.6);
                 
-                // Only send if frame has changed significantly or enough time has passed
-                const lastFrame = lastSentFrames.get(screenId);
-                const shouldSendFrame = !lastFrame || 
-                                        frameHasChangedSignificantly(lastFrame, frameData) || 
-                                        Date.now() - (lastFrame.timestamp || 0) > 1000; // Force update every second
-                
-                if (shouldSendFrame) {
-                    // Get current screens presence data
-                    const currentPresence = room.party.presence[room.party.client.id] || {};
-                    const screensPresence = { ...(currentPresence.screens || {}) };
-                    
-                    // Update screen with new frame
-                    screensPresence[screenId] = {
-                        title: `Screen ${screenId} from ${room.party.client.username}`,
-                        active: true,
-                        frameData: frameData,
-                        timestamp: Date.now()
-                    };
-                    
-                    // Update presence with ALL screens to ensure nothing is lost
-                    room.party.updatePresence({
-                        isLive: true,
-                        username: room.party.client.username,
-                        screens: screensPresence
-                    });
-                    
-                    // Store this frame as the last sent frame
-                    lastSentFrames.set(screenId, {
-                        data: frameData,
-                        timestamp: Date.now()
-                    });
-                }
+                // Send the frame data
+                room.send({
+                    type: "screenFrame",
+                    screenId: screenId,
+                    clientId: room.party.client.id,
+                    username: room.party.client.username,
+                    frameData: frameData
+                });
             }
-        }, 200); // Capture more frequently for smoother updates
+        }, 500); // Send frame every 500ms (adjust for performance)
     }
 }
 
-// Helper function to determine if a frame has changed significantly
-function frameHasChangedSignificantly(lastFrame, newFrameData) {
-    // Simple heuristic: if the data length has changed by more than 5%
-    const lastLength = lastFrame.data.length;
-    const newLength = newFrameData.length;
-    
-    return Math.abs(lastLength - newLength) / lastLength > 0.05;
-}
-
-// Function to handle remote screen updates from presence
-function updateRemoteScreenFromPresence(clientId, screenId, screenData) {
-    // Skip our own screens
-    if (clientId === room.party.client.id) return;
-    
-    // If the presence indicates this screen is no longer active, remove it
-    if (screenData && screenData.active === false) {
-        const remoteScreen = remoteScreens.find(
-            s => s.clientId === clientId && s.screenId === screenId
-        );
-        if (remoteScreen) {
-            remoteScreen.element.remove();
-            remoteScreens = remoteScreens.filter(
-                s => !(s.clientId === clientId && s.screenId === screenId)
-            );
-        }
-        return;
-    }
-    
-    // Check if we have this screen
-    const remoteScreen = remoteScreens.find(
-        s => s.clientId === clientId && s.screenId === screenId
-    );
-    
-    // Create screen if it doesn't exist
-    if (!remoteScreen && screenData.active) {
-        // Create the screen with metadata
-        updateRemoteScreensMetadata({
-            clientId,
-            screenId,
-            username: screenData.username || room.party.peers[clientId]?.username,
-            title: screenData.title
-        });
-        
-        // Add this screen to the user's screens count
-        updateLiveUser(clientId, {
-            screenId: screenId,
-            username: room.party.peers[clientId]?.username
-        });
-    }
-    
-    // Update the screen with new frame data
-    if (screenData.frameData) {
-        // Add frame to buffer
-        if (!frameBuffer.has(`${clientId}-${screenId}`)) {
-            frameBuffer.set(`${clientId}-${screenId}`, []);
-        }
-        
-        const buffer = frameBuffer.get(`${clientId}-${screenId}`);
-        buffer.push({
-            frameData: screenData.frameData,
-            timestamp: screenData.timestamp || Date.now()
-        });
-        
-        // Keep only the last 5 frames in buffer
-        if (buffer.length > 5) buffer.shift();
-        
-        // Find the remote screen again in case it was just created
-        const screen = remoteScreens.find(
-            s => s.clientId === clientId && s.screenId === screenId
-        );
-        
-        if (screen && screen.imageElement) {
-            // Use the latest frame from buffer
-            screen.imageElement.src = buffer[buffer.length - 1].frameData;
-        }
-        
-        // Also update the live user preview
-        updateLiveUserPreview(clientId, { frameData: screenData.frameData });
-    }
-}
-
-// renamed from updateRemoteScreens to be clearer about its purpose
-function updateRemoteScreensMetadata(data) {
+function updateRemoteScreens(data) {
     // Skip our own screens
     if (data.clientId === room.party.client.id) return;
     
@@ -717,6 +544,7 @@ function updateRemoteScreensMetadata(data) {
             <div class="screen-title">${data.title || `Screen from ${data.username}`}</div>
             <div class="screen-controls">
                 <span class="screen-control-btn remote-username">${data.username}</span>
+                <span class="buffer-status" id="buffer-status-${data.clientId}-${data.screenId}">Buffering...</span>
             </div>
         </div>
         <img class="screen-video" id="remote-img-${data.clientId}-${data.screenId}" alt="Remote screen" />
@@ -724,18 +552,186 @@ function updateRemoteScreensMetadata(data) {
     
     screensContainer.appendChild(screenWrapper);
     
+    // Initialize buffer for this screen
+    const bufferKey = `${data.clientId}-${data.screenId}`;
+    if (!videoBuffers.has(bufferKey)) {
+        videoBuffers.set(bufferKey, {
+            frames: [],
+            lastDisplayedFrame: 0,
+            playing: false,
+            bufferSize: 5, // Number of frames to buffer before starting playback
+            bufferInterval: null
+        });
+    }
+    
     // Add to our remote screens array
     remoteScreens.push({
         clientId: data.clientId,
         screenId: data.screenId,
         element: screenWrapper,
-        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`)
+        imageElement: screenWrapper.querySelector(`#remote-img-${data.clientId}-${data.screenId}`),
+        bufferStatus: screenWrapper.querySelector(`#buffer-status-${data.clientId}-${data.screenId}`)
     });
     
     // Setup drag events
     screenWrapper.setAttribute('draggable', 'true');
     screenWrapper.addEventListener('dragstart', handleDragStart);
     screenWrapper.addEventListener('dragend', handleDragEnd);
+    
+    // Start buffer playback
+    startBufferPlayback(bufferKey);
+}
+
+function updateRemoteScreenFrame(data) {
+    // Skip our own frames
+    if (data.clientId === room.party.client.id) return;
+    
+    // Create buffer key for this screen
+    const bufferKey = `${data.clientId}-${data.screenId}`;
+    
+    // Add frame to buffer
+    if (!videoBuffers.has(bufferKey)) {
+        videoBuffers.set(bufferKey, {
+            frames: [],
+            lastDisplayedFrame: 0,
+            playing: false,
+            bufferSize: 5, // Number of frames to buffer before starting playback
+            bufferInterval: null
+        });
+    }
+    
+    // Add the frame to the buffer
+    videoBuffers.get(bufferKey).frames.push({
+        frameData: data.frameData,
+        timestamp: Date.now()
+    });
+    
+    // Find the remote screen
+    const remoteScreen = remoteScreens.find(
+        s => s.clientId === data.clientId && s.screenId === data.screenId
+    );
+    
+    if (remoteScreen) {
+        // Update buffer status
+        const bufferSize = videoBuffers.get(bufferKey).frames.length;
+        const minBufferSize = videoBuffers.get(bufferKey).bufferSize;
+        
+        if (remoteScreen.bufferStatus) {
+            if (bufferSize < minBufferSize) {
+                remoteScreen.bufferStatus.textContent = `Buffering (${bufferSize}/${minBufferSize})...`;
+                remoteScreen.bufferStatus.style.display = 'inline';
+            } else {
+                remoteScreen.bufferStatus.style.display = 'none';
+            }
+        }
+        
+        // Start playback if not already started
+        if (!videoBuffers.get(bufferKey).playing) {
+            startBufferPlayback(bufferKey);
+        }
+    } else if (currentPage === 'viewUser' && currentViewingUserId === data.clientId) {
+        // If we don't have this screen yet but we're viewing this user, create it
+        updateRemoteScreens(data);
+    }
+}
+
+function removeRemoteScreen(data) {
+    const index = remoteScreens.findIndex(
+        s => s.clientId === data.clientId && s.screenId === data.screenId
+    );
+    
+    if (index !== -1) {
+        // Stop buffer playback
+        const bufferKey = `${data.clientId}-${data.screenId}`;
+        if (videoBuffers.has(bufferKey)) {
+            const buffer = videoBuffers.get(bufferKey);
+            if (buffer.bufferInterval) {
+                clearInterval(buffer.bufferInterval);
+            }
+            videoBuffers.delete(bufferKey);
+        }
+        
+        // Remove from DOM
+        remoteScreens[index].element.remove();
+        // Remove from array
+        remoteScreens.splice(index, 1);
+    }
+}
+
+function startBufferPlayback(bufferKey) {
+    // Get the buffer for this screen
+    const buffer = videoBuffers.get(bufferKey);
+    if (!buffer) return;
+    
+    // Already playing
+    if (buffer.playing && buffer.bufferInterval) return;
+    
+    // Find the corresponding remote screen
+    const [clientId, screenId] = bufferKey.split('-');
+    const remoteScreen = remoteScreens.find(
+        s => s.clientId === clientId && s.screenId === parseInt(screenId)
+    );
+    
+    if (!remoteScreen) return;
+    
+    // Set playing flag
+    buffer.playing = true;
+    
+    // Start buffer playback interval
+    buffer.bufferInterval = setInterval(() => {
+        // Check if we have enough frames buffered to start playing
+        if (buffer.frames.length < buffer.bufferSize && buffer.lastDisplayedFrame === 0) {
+            // Not enough frames yet, wait for more
+            if (remoteScreen.bufferStatus) {
+                remoteScreen.bufferStatus.textContent = 
+                    `Buffering (${buffer.frames.length}/${buffer.bufferSize})...`;
+                remoteScreen.bufferStatus.style.display = 'inline';
+            }
+            return;
+        }
+        
+        // Hide buffer status once we start playing
+        if (remoteScreen.bufferStatus) {
+            remoteScreen.bufferStatus.style.display = 'none';
+        }
+        
+        // Display the next frame
+        if (buffer.frames.length > buffer.lastDisplayedFrame) {
+            const frame = buffer.frames[buffer.lastDisplayedFrame];
+            if (remoteScreen.imageElement) {
+                remoteScreen.imageElement.src = frame.frameData;
+            }
+            buffer.lastDisplayedFrame++;
+            
+            // If we've reached the end of our buffer but more frames are coming in
+            // maintain a good buffer size before continuing
+            if (buffer.lastDisplayedFrame >= buffer.frames.length - 2) {
+                // Keep the last 2 frames for history
+                if (buffer.frames.length > buffer.bufferSize + 2) {
+                    buffer.frames = buffer.frames.slice(-buffer.bufferSize - 2);
+                    buffer.lastDisplayedFrame = 2; // Reset to show the oldest frame in our new buffer
+                }
+            }
+        }
+    }, 500); // Match the frame rate from sender
+}
+
+// Add function to restart video buffering when a viewer joins
+function restartAllBuffers() {
+    // Stop all existing buffer playbacks
+    videoBuffers.forEach((buffer, key) => {
+        if (buffer.bufferInterval) {
+            clearInterval(buffer.bufferInterval);
+            buffer.bufferInterval = null;
+        }
+        
+        // Reset buffer to start playback from the beginning
+        buffer.playing = false;
+        buffer.lastDisplayedFrame = 0;
+        
+        // Start playback again
+        startBufferPlayback(key);
+    });
 }
 
 // Drag and drop functionality
@@ -914,58 +910,8 @@ function renderLiveUsers() {
 }
 
 function refreshLiveUsers() {
-    // Check current presence data for live users
-    for (const clientId in room.party.presence) {
-        if (clientId === room.party.client.id) continue;
-        
-        const presenceData = room.party.presence[clientId];
-        if (presenceData.isLive) {
-            // Add this user to live users if not already there
-            if (!liveUsers.has(clientId)) {
-                addLiveUser(clientId, presenceData.username || room.party.peers[clientId]?.username);
-            }
-            
-            // Update screens info from presence
-            if (presenceData.screens) {
-                const activeScreens = Object.keys(presenceData.screens).filter(
-                    screenId => presenceData.screens[screenId].active
-                );
-                
-                if (liveUsers.has(clientId)) {
-                    const user = liveUsers.get(clientId);
-                    user.screens = activeScreens;
-                    
-                    // Also ensure the screens are properly displayed if we're viewing this user
-                    if (currentViewingUserId === clientId) {
-                        for (const screenId in presenceData.screens) {
-                            const screenData = presenceData.screens[screenId];
-                            if (screenData && screenData.active) {
-                                updateRemoteScreenFromPresence(clientId, screenId, screenData);
-                            }
-                        }
-                    }
-                    
-                    // Update preview if available
-                    if (activeScreens.length > 0) {
-                        const firstScreenData = presenceData.screens[activeScreens[0]];
-                        if (firstScreenData.frameData) {
-                            user.preview = firstScreenData.frameData;
-                        }
-                    }
-                }
-            }
-        } else if (liveUsers.has(clientId)) {
-            // Remove from live users if no longer live
-            removeLiveUser(clientId);
-        }
-    }
-    
-    // Request live status from all users to ensure we have the latest
-    room.send({
-        type: "requestLiveStatus",
-        clientId: room.party.client.id
-    });
-    
+    // This would typically query the server for who is live
+    // For now, we rely on messages to build our list
     renderLiveUsers();
 }
 
